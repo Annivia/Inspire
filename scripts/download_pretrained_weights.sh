@@ -1,10 +1,8 @@
 pip install huggingface_hub
 
-mkdir pretrained/
-cd pretrained/
-
+cd /projects/bfbo/xzhang42/Inspire/pretrained/
 current_dir=$(pwd)
-cd ~/.cache/huggingface/hub
+cd $HF_HOME/hub
 huggingface_cache_dir=$(pwd)
 cd $current_dir
 
@@ -13,13 +11,11 @@ if [ ! -d "prism-qwen25-extra-dinosiglip-224px-0_5b" ]; then
     ln -s ${huggingface_cache_dir}/models--Stanford-ILIAD--prism-qwen25-extra-dinosiglip-224px-0_5b/snapshots/5cfd2cc6da00c06e0be7abf35d43ec792d8e9498 ${current_dir}/prism-qwen25-extra-dinosiglip-224px-0_5b
 fi
 
-cd ..
 
-mkdir runs
-cd runs/
+cd /projects/bfbo/xzhang42/Inspire/runs/
 
 current_dir=$(pwd)
-cd ~/.cache/huggingface/hub
+cd $HF_HOME/hub
 huggingface_cache_dir=$(pwd)
 cd $current_dir
 
@@ -33,13 +29,10 @@ if [ ! -d "minivla-inspire-libero-90" ]; then
     ln -s ${huggingface_cache_dir}/models--InspireVLA--minivla-inspire-libero-90/snapshots/b87707dd847b9361e267ee8ee2dbb98e852e13c1 ${current_dir}/minivla-inspire-libero-90
 fi
 
-cd ..
-
-mkdir pretrained/
-cd pretrained/
+cd /projects/bfbo/xzhang42/Inspire/pretrained/
 
 current_dir=$(pwd)
-cd ~/.cache/huggingface/hub
+cd $HF_HOME/hub
 huggingface_cache_dir=$(pwd)
 cd $current_dir
 
@@ -48,10 +41,10 @@ if [ ! -d "prism-qwen25-extra-dinosiglip-224px-0_5b" ]; then
     ln -s ${huggingface_cache_dir}/models--Stanford-ILIAD--prism-qwen25-extra-dinosiglip-224px-0_5b/snapshots/5cfd2cc6da00c06e0be7abf35d43ec792d8e9498 ${current_dir}/prism-qwen25-extra-dinosiglip-224px-0_5b
 fi
 
-cd ..
+cd /projects/bfbo/xzhang42/Inspire/
 
 current_dir=$(pwd)
-cd ~/.cache/huggingface/hub
+cd $HF_HOME/hub
 huggingface_cache_dir=$(pwd)
 cd $current_dir
 
