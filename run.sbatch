@@ -23,5 +23,11 @@ if torch.cuda.is_available():
     print("GPU name:", torch.cuda.get_device_name(0))
 EOF
 
+export PYTHONPATH=/u/xzhang42/Inspire/LIBERO:$PYTHONPATH
+export PYTHONPATH=/u/xzhang42/Inspire/vq_bet_official:$PYTHONPATH
+
+
 export HF_HOME=/projects/bfbo/xzhang42/huggingface
 echo "[HF_CACHE] Hugging Face cache directory is set to: $HF_HOME"
+
+bash /u/xzhang42/Inspire/vla_scripts/eval/eval_baseline_libero90.sh
