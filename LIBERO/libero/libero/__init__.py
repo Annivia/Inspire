@@ -66,23 +66,26 @@ if not os.path.exists(config_file):
     # Create a default config file
 
     default_path_dict = get_default_path_dict()
-    answer = input(
-        "Do you want to specify a custom path for the dataset folder? (Y/N): "
-    ).lower()
+    # answer = input(
+    #     "Do you want to specify a custom path for the dataset folder? (Y/N): "
+    # ).lower()
+    answer = "y"
     if answer == "y":
         # If the user wants to specify a custom storage path, prompt them to enter it
-        custom_dataset_path = input(
-            "Enter the path where you want to store the datasets: "
-        )
+        # custom_dataset_path = input(
+        #     "Enter the path where you want to store the datasets: "
+        # )
+        custom_dataset_path = "/projects/bfbo/xzhang42/Inspire/libero"
         full_custom_dataset_path = os.path.join(
             os.path.abspath(os.path.expanduser(custom_dataset_path)), "datasets"
         )
-        # Check if the custom storage path exists, and create if it doesn't
+        # # Check if the custom storage path exists, and create if it doesn't
 
-        print("The full path of the custom storage path you entered is:")
-        print(full_custom_dataset_path)
-        print("Do you want to continue? (Y/N)")
-        confirm_answer = input().lower()
+        # print("The full path of the custom storage path you entered is:")
+        # print(full_custom_dataset_path)
+        # print("Do you want to continue? (Y/N)")
+        # confirm_answer = input().lower()
+        confirm_answer = "y"
         if confirm_answer == "y":
             if not os.path.exists(full_custom_dataset_path):
                 os.makedirs(full_custom_dataset_path)

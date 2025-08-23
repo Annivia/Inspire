@@ -11,7 +11,7 @@
 
 # module load cuda/12.6.1
 source ~/.bashrc
-conda activate coconut
+conda activate inspire
 
 NUM_GPUS=$SLURM_GPUS_ON_NODE
 echo "Number of GPUs allocated: $NUM_GPUS"

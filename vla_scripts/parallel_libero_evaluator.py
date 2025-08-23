@@ -1,5 +1,8 @@
 import os
-os.environ["MUJOCO_GL"] = "osmesa"
+# os.environ["MUJOCO_GL"] = "osmesa"
+os.environ["MUJOCO_GL"] = "egl" 
+os.environ["MUJOCO_EGL_DEVICE_ID"] = "0"
+
 
 import argparse
 import math
@@ -8,6 +11,10 @@ import numpy as np
 import traceback
 from PIL import Image
 from pathlib import Path
+import torch, random, numpy as np
+torch.manual_seed(0)
+random.seed(0)
+np.random.seed(0)
 
 import sys
 sys.path.append('.')
@@ -94,7 +101,7 @@ class GenerateConfig:
     def __init__(self,
                  model_family="prismatic",
                  hf_token=Path(".hf_token"),
-                 pretrained_checkpoint="runs/prism-qwen25-dinosiglip-224px+0_5b+mx-libero-90+n0+b16+x7/",
+                 pretrained_checkpoint="/projects/bfbo/xzhang42/Inspire/runs/prism-qwen25-dinosiglip-224px+0_5b+mx-libero-90+n0+b16+x7/",
                  load_step=None,
                  load_in_8bit=False,
                  load_in_4bit=False,
