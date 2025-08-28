@@ -7,7 +7,7 @@
 #SBATCH --account=bfbo-dtai-gh
 #SBATCH --partition=ghx4
 #SBATCH --gres=gpu:h100:4
-#SBATCH --nodes=2
+#SBATCH --nodes=1
 
 module load cuda/12.6.1
 source ~/.bashrc
@@ -15,6 +15,8 @@ conda activate inspire
 
 NUM_GPUS=$SLURM_GPUS_ON_NODE
 echo "Number of GPUs allocated: $NUM_GPUS"
+
+# pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu126
 
 python - <<'EOF'
 import torch
@@ -25,5 +27,9 @@ EOF
 
 export PYTHONPATH=/u/xzhang42/Inspire/LIBERO:$PYTHONPATH
 export PYTHONPATH=/u/xzhang42/Inspire/vq_bet_official:$PYTHONPATH
+
+
+export HF_HOME=/work/nvme/bfbo/xzhang42/huggingface
+echo "[HF_CACHE] Hugging Face cache directory is set to: $HF_HOME"
 
 bash /u/xzhang42/Inspire/vla_scripts/eval/eval_baseline_libero90.sh
