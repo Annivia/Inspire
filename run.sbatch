@@ -7,7 +7,7 @@
 #SBATCH --account=bfbo-dtai-gh
 #SBATCH --partition=ghx4
 #SBATCH --gres=gpu:h100:4
-#SBATCH --nodes=1
+#SBATCH --nodes=2
 
 # module load cuda/12.6.1
 source ~/.bashrc
@@ -21,13 +21,13 @@ import torch
 print("Is CUDA available?:", torch.cuda.is_available())
 if torch.cuda.is_available():
     print("GPU name:", torch.cuda.get_device_name(0))
-EOF
+EOF ### cuda is not available
 
 export PYTHONPATH=/u/xzhang42/Inspire/LIBERO:$PYTHONPATH
 export PYTHONPATH=/u/xzhang42/Inspire/vq_bet_official:$PYTHONPATH
 
 
-export HF_HOME=/projects/bfbo/xzhang42/huggingface
+export HF_HOME=/work/nvme/bfbo/xzhang42/huggingface
 echo "[HF_CACHE] Hugging Face cache directory is set to: $HF_HOME"
 
 bash /u/xzhang42/Inspire/vla_scripts/eval/eval_baseline_libero90.sh
