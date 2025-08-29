@@ -25,6 +25,7 @@ EOF
 
 export PYTHONPATH=/u/xzhang42/Inspire/LIBERO:$PYTHONPATH
 export PYTHONPATH=/u/xzhang42/Inspire/vq_bet_official:$PYTHONPATH
+export PYTHONPATH=/u/xzhang42/Inspire:$PYTHONPATH
 
 export PRISMATIC_DATA_ROOT=/projects/bfbo/xzhang42/Inspire
 
