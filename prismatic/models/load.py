@@ -9,7 +9,7 @@ import json
 import os
 from pathlib import Path
 from typing import List, Optional, Union
-
+import re
 from huggingface_hub import HfFileSystem, hf_hub_download
 
 from prismatic.conf import ModelConfig
@@ -46,6 +46,24 @@ def get_model_description(model_id_or_name: str) -> str:
     print(json.dumps(description := GLOBAL_REGISTRY[model_id_or_name]["description"], indent=2))
 
     return description
+
+
+# === utils ===
+def fix_model_name(original_name):
+    """Test the model name fixing logic"""
+    fixed_name = original_name
+    
+    # Remove 'pretrained/' prefix if present
+    if fixed_name.startswith('pretrained/'):
+        fixed_name = fixed_name[len('pretrained/'):]
+        print(f"After removing prefix: {fixed_name}")
+    
+    # Replace '-' with '+' before version numbers
+    if re.search(r'-\d+(?:_\d+)?b$', fixed_name):
+        fixed_name = re.sub(r'-(\d+(?:_\d+)?b)$', r'+\1', fixed_name)
+        print(f"After fixing version separator: {fixed_name}")
+    
+    return fixed_name
 
 
 # === Load Pretrained Model ===
@@ -192,6 +210,16 @@ def load_vla(
         with open(Path(base_vlm) / "config.json", "r") as f:
             base_cfg = json.load(f)["model"]
             base_vlm = base_cfg["model_id"]
+
+    # Fix model name if it doesn't match registry format
+    available_configs = set(ModelConfig._choice_registry.keys())
+    if base_vlm not in available_configs:
+        fixed_base_vlm = fix_model_name(base_vlm)
+        if fixed_base_vlm in available_configs:
+            overwatch.info(f"Fixed base_vlm: '{base_vlm}' -> '{fixed_base_vlm}'")
+            base_vlm = fixed_base_vlm
+        else:
+            overwatch.error(f"Could not fix base_vlm '{base_vlm}' - not found in registry")
 
     overwatch.info(f"Base vlm: {base_vlm}")
     model_cfg = ModelConfig.get_choice_class(base_vlm)()
