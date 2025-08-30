@@ -187,29 +187,30 @@ class VQActionTokenizer(ActionTokenizer):
         # the number of future action horizon elements
         return self.vq_vae.input_dim_h - 1
 
+vq_vae_path_prior = "/projects/bfbo/xzhang42/Inspire/"
 
 ACTION_TOKENIZERS = {
     "action_tokenizer": ActionTokenizer,
     "extra_action_tokenizer": partial(ActionTokenizer, use_extra=True),
     # libero
     "libero_vq_action_tokenizer": partial(
-        VQActionTokenizer, vq_vae_path="vq/pretrain_vq+mx-libero_90+fach-7+ng-7+nemb-128+nlatent-512"
+        VQActionTokenizer, vq_vae_path=f"{vq_vae_path_prior}vq/pretrain_vq+mx-libero_90+fach-7+ng-7+nemb-128+nlatent-512"
     ),
     "libero_vq_extra_action_tokenizer": partial(
-        VQActionTokenizer, vq_vae_path="vq/pretrain_vq+mx-libero_90+fach-7+ng-7+nemb-128+nlatent-512", use_extra=True
+        VQActionTokenizer, vq_vae_path=f"{vq_vae_path_prior}vq/pretrain_vq+mx-libero_90+fach-7+ng-7+nemb-128+nlatent-512", use_extra=True
     ),
     "libero_vq_extra_action_tokenizer_chunk10": partial(
-        VQActionTokenizer, vq_vae_path="vq/pretrain_vq+mx-libero_union4+fach-9+ng-7+nemb-128+nlatent-512", use_extra=True
-    ),
+        VQActionTokenizer, vq_vae_path=f"{vq_vae_path_prior}vq/pretrain_vq+mx-libero_union4+fach-9+ng-7+nemb-128+nlatent-512", use_extra=True
+    ), # Not existent 
     "libero_vq_extra_action_tokenizer_chunk16": partial(
-        VQActionTokenizer, vq_vae_path="vq/pretrain_vq+mx-libero_union4+fach-15+ng-7+nemb-128+nlatent-512", use_extra=True
-    ),
+        VQActionTokenizer, vq_vae_path=f"{vq_vae_path_prior}vq/pretrain_vq+mx-libero_union4+fach-15+ng-7+nemb-128+nlatent-512", use_extra=True
+    ), # Not existent 
     "libero_vq_extra_action_tokenizer2": partial(
         VQActionTokenizer, vq_vae_path="../vq/pretrain_vq+mx-libero_90+fach-7+ng-7+nemb-128+nlatent-512", use_extra=True
-    ),
+    ), # Not existent 
     "libero_vq_h0_extra_action_tokenizer": partial(
         VQActionTokenizer, vq_vae_path="vq/pretrain_vq+mx-libero_90+fach-0+ng-7+nemb-128+nlatent-512", use_extra=True
-    ),
+    ), # Not existent 
     # bridge
     "bridge_vq_extra_action_tokenizer": partial(
         VQActionTokenizer,

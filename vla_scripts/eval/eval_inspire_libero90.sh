@@ -20,7 +20,7 @@ for task_suite_name in "${task_suite_names[@]}"; do
         --num-processes $num_processes \
         --task-suite-name $task_suite_name \
         --pretrained-checkpoint /work/nvme/bfbo/xzhang42/Inspire/runs/$name \
-        --save-root results/$name \
+        --save-root /work/nvme/bfbo/xzhang42/Inspire/results/$name \
         --with-vqa true \
         --steps $steps 
 done
