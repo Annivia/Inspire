@@ -27,6 +27,14 @@ export PYTHONPATH=/u/xzhang42/Inspire/LIBERO:$PYTHONPATH
 export PYTHONPATH=/u/xzhang42/Inspire/vq_bet_official:$PYTHONPATH
 export PYTHONPATH=/u/xzhang42/Inspire:$PYTHONPATH
 
-export PRISMATIC_DATA_ROOT=/projects/bfbo/xzhang42/Inspire
+echo "Transferring data..."
+rsync -av /projects/bfbo/xzhang42/Inspire /work/nvme/bfbo/xzhang42/
+echo "Data Transfer Completed..."
+
+export PRISMATIC_DATA_ROOT=/work/nvme/bfbo/xzhang42/Inspire 
 
 bash /u/xzhang42/Inspire/vla_scripts/eval/eval_baseline_libero90.sh
+
+echo "Transferring results..."
+rsync -av /work/nvme/bfbo/xzhang42/Inspire/results /projects/bfbo/xzhang42/Inspire
+echo "Results Transfer Completed..."
