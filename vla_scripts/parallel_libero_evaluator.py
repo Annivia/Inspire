@@ -252,6 +252,8 @@ class ParallelLiberoEvaluator:
         self.logger.info("Evaluation finished.")
     
     # def evaluate_episodes(self, gpu, task_ids_and_episodes, show_detail, summaries):
+        # os.environ["MUJOCO_GL"] = "egl" 
+        # os.environ["MUJOCO_EGL_DEVICE_ID"] = str(gpu)
     #     try:
     #         print(f"Process starting on GPU {gpu}")
     #         from libero.libero import benchmark
@@ -278,6 +280,9 @@ class ParallelLiberoEvaluator:
     #             f.write(traceback.format_exc())
 
     def evaluate_episodes(self, gpu, task_ids_and_episodes, show_detail, summaries):
+        os.environ["MUJOCO_GL"] = "egl" 
+        os.environ["MUJOCO_EGL_DEVICE_ID"] = str(gpu)
+
         import sys
         import time
         
@@ -441,14 +446,47 @@ class ParallelLiberoEvaluator:
     def _build_logger(self, mode='w'):
         self.logger = Logger(os.path.join(self.save_dir, '000.log'), mode=mode)
 
+    # def _check_free_gpus(self):
+    #     """ Check free GPUs. Incompatible with HPC system"""
+    #     used_memorys = os.popen(f"nvidia-smi --query-gpu=memory.used --format=csv,nounits,noheader").readlines()
+    #     used_memorys = [int(memory.strip()) for memory in used_memorys]
+    #     return [i for i, memory in enumerate(used_memorys) if memory < 1000]
+
     def _check_free_gpus(self):
-        """ Check free GPUs. """
-        used_memorys = os.popen(f"nvidia-smi --query-gpu=memory.used --format=csv,nounits,noheader").readlines()
-        used_memorys = [int(memory.strip()) for memory in used_memorys]
-        return [i for i, memory in enumerate(used_memorys) if memory < 1000]
+        """ Get GPUs allocated to this job. Compatible with HPC system"""
+        # Try to get GPUs from SLURM environment
+        if "CUDA_VISIBLE_DEVICES" in os.environ:
+            cuda_devices = os.environ["CUDA_VISIBLE_DEVICES"]
+            if cuda_devices:
+                return [int(x) for x in cuda_devices.split(',')]
+        
+        # Try SLURM_STEP_GPUS or SLURM_JOB_GPUS
+        for env_var in ["SLURM_STEP_GPUS", "SLURM_JOB_GPUS"]:
+            if env_var in os.environ:
+                gpu_ids = os.environ[env_var]
+                return [int(x) for x in gpu_ids.split(',')]
+        
+        # Fallback: check nvidia-smi but be more lenient
+        print("ERRRRORRRRR: shouldn't make it to this step")
+        try:
+            used_memorys = os.popen(f"nvidia-smi --query-gpu=memory.used --format=csv,nounits,noheader").readlines()
+            used_memorys = [int(memory.strip()) for memory in used_memorys]
+            # Use more lenient threshold for HPC
+            available_gpus = [i for i, memory in enumerate(used_memorys) if memory < 5000]  # 5GB threshold
+            
+            if not available_gpus:
+                print("Warning: No GPUs found with reasonable memory usage. Using all detected GPUs.")
+                return list(range(len(used_memorys)))
+            
+            return available_gpus
+        except Exception as e:
+            print(f"Error checking GPU memory: {e}")
+            print("Falling back to using GPU 0")
+            return [0]
 
     def _set_gpu(self, gpu):
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
+        os.environ["MUJOCO_EGL_DEVICE_ID"] = str(gpu)
         # list_physical devices can avoid cuda error, don't know why
         import tensorflow as tf
         tf.config.list_physical_devices("GPU")
