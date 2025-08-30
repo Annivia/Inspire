@@ -38,6 +38,7 @@ def get_image_resize_size(cfg):
     return resize_size
 
 
+
 def apply_center_crop(im, t_h, t_w):
     assert im.shape[-3] >= t_h and im.shape[-2] >= t_w
     assert im.shape[-1] in [1, 3, 6]
@@ -101,7 +102,7 @@ class GenerateConfig:
     def __init__(self,
                  model_family="prismatic",
                  hf_token=Path(".hf_token"),
-                 pretrained_checkpoint="/projects/bfbo/xzhang42/Inspire/runs/prism-qwen25-dinosiglip-224px+0_5b+mx-libero-90+n0+b16+x7/",
+                 pretrained_checkpoint="/work/nvme/bfbo/xzhang42/Inspire/runs/prism-qwen25-dinosiglip-224px+0_5b+mx-libero-90+n0+b16+x7/",
                  load_step=None,
                  load_in_8bit=False,
                  load_in_4bit=False,
@@ -151,7 +152,7 @@ class GenerateConfig:
 class ParallelLiberoEvaluator:
     def __init__(self, cfg, opts=None):
         # [Note] Data root is not used for evaluation
-        os.environ["PRISMATIC_DATA_ROOT"] = 'data/prismatic'
+        # os.environ["PRISMATIC_DATA_ROOT"] = '/projects/bfbo/xzhang42/Inspire' #### @Polina remember to change it to /work
         # [Note] Tokenizers parallelism is set to true for faster tokenization
         os.environ["TOKENIZERS_PARALLELISM"] = 'true'
 
@@ -193,15 +194,22 @@ class ParallelLiberoEvaluator:
     def evaluate(self):
         from libero.libero import benchmark
 
+        multiprocessing.set_start_method('spawn', force=True)
+
         self._set_results()
         self._build_logger()
         self.logger.infos('Config', vars(self.cfg))
 
         self.resize_size = get_image_resize_size(self.cfg)
 
+        # benchmark_dict = benchmark.get_benchmark_dict()
+        # self.task_suite = benchmark_dict[self.cfg.task_suite_name]()
+        # num_tasks_in_suite = self.task_suite.n_tasks
+
+        # Polina: move task suite creation to subprocesses
         benchmark_dict = benchmark.get_benchmark_dict()
-        self.task_suite = benchmark_dict[self.cfg.task_suite_name]()
-        num_tasks_in_suite = self.task_suite.n_tasks
+        task_suite_class = benchmark_dict[self.cfg.task_suite_name] 
+        num_tasks_in_suite = task_suite_class().n_tasks 
 
         gpus = self._check_free_gpus()
         if self.cfg.num_gpus < len(gpus):
@@ -243,26 +251,117 @@ class ParallelLiberoEvaluator:
         self.logger.info(f"Overall success rate: {success_rate:.2f}")
         self.logger.info("Evaluation finished.")
     
+    # def evaluate_episodes(self, gpu, task_ids_and_episodes, show_detail, summaries):
+    #     try:
+    #         print(f"Process starting on GPU {gpu}")
+    #         from libero.libero import benchmark
+    #         benchmark_dict = benchmark.get_benchmark_dict()
+    #         task_suite = benchmark_dict[self.cfg.task_suite_name]()
+    #         print(f"GPU {gpu}: Task suite loaded")
+            
+    #         model, processor = self._build_policy(gpu)
+    #         print(f"GPU {gpu}: Model loaded")
+    #         reset_logging()
+    #         self._build_logger(mode='a')
+
+    #         for task_id, episode in task_ids_and_episodes:
+    #             self.logger.info(f"GPU {gpu}: task {task_id} episode {episode}")
+    #             summary = self.evalute_single(model, task_suite, processor, task_id, episode, show_detail)
+    #             summaries.append(summary)
+        
+    #     except Exception as e:
+    #         print(f"GPU {gpu} failed with error: {str(e)}")
+    #         self.logger.error(str(e))
+    #         self.logger.error(traceback.format_exc())
+    #         with open(os.path.join(self.save_dir, f'error_gpu{gpu}.log'), 'w') as f:
+    #             f.write(str(e) + '\n')
+    #             f.write(traceback.format_exc())
+
     def evaluate_episodes(self, gpu, task_ids_and_episodes, show_detail, summaries):
+        import sys
+        import time
+        
+        print(f"[DEBUG] Process {os.getpid()} starting on GPU {gpu}", flush=True)
+        print(f"[DEBUG] GPU {gpu}: Python version: {sys.version}", flush=True)
+        print(f"[DEBUG] GPU {gpu}: Current working directory: {os.getcwd()}", flush=True)
+        print(f"[DEBUG] GPU {gpu}: CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set')}", flush=True)
+        print(f"[DEBUG] GPU {gpu}: PRISMATIC_DATA_ROOT: {os.environ.get('PRISMATIC_DATA_ROOT', 'Not set')}", flush=True)
+        print(f"[DEBUG] GPU {gpu}: Task assignments: {len(task_ids_and_episodes)} tasks", flush=True)
+        
         try:
+            print(f"[DEBUG] GPU {gpu}: Starting libero benchmark import", flush=True)
+            from libero.libero import benchmark
+            print(f"[DEBUG] GPU {gpu}: Benchmark import successful", flush=True)
+            
+            print(f"[DEBUG] GPU {gpu}: Getting benchmark dict", flush=True)
+            benchmark_dict = benchmark.get_benchmark_dict()
+            print(f"[DEBUG] GPU {gpu}: Benchmark dict keys: {list(benchmark_dict.keys())}", flush=True)
+            
+            print(f"[DEBUG] GPU {gpu}: Creating task suite: {self.cfg.task_suite_name}", flush=True)
+            task_suite = benchmark_dict[self.cfg.task_suite_name]()
+            print(f"[DEBUG] GPU {gpu}: Task suite loaded, n_tasks: {task_suite.n_tasks}", flush=True)
+            
+            print(f"[DEBUG] GPU {gpu}: Starting model loading process", flush=True)
+            print(f"[DEBUG] GPU {gpu}: Checkpoint path: {self.cfg.pretrained_checkpoint}", flush=True)
+            print(f"[DEBUG] GPU {gpu}: Model family: {self.cfg.model_family}", flush=True)
+            
+            print(f"[DEBUG] GPU {gpu}: Calling _build_policy", flush=True)
             model, processor = self._build_policy(gpu)
+            print(f"[DEBUG] GPU {gpu}: Model loaded successfully", flush=True)
+            print(f"[DEBUG] GPU {gpu}: Model type: {type(model)}", flush=True)
+            print(f"[DEBUG] GPU {gpu}: Processor type: {type(processor)}", flush=True)
+            
+            print(f"[DEBUG] GPU {gpu}: Resetting logging", flush=True)
             reset_logging()
             self._build_logger(mode='a')
+            print(f"[DEBUG] GPU {gpu}: Logger initialized", flush=True)
 
-            for task_id, episode in task_ids_and_episodes:
-                self.logger.info(f"GPU {gpu}: task {task_id} episode {episode}")
-                summary = self.evalute_single(model, processor, task_id, episode, show_detail)
-                summaries.append(summary)
-        
-        except Exception as e:
-            self.logger.error(str(e))
-            self.logger.error(traceback.format_exc())
-            with open(os.path.join(self.save_dir, f'error_gpu{gpu}.log'), 'w') as f:
-                f.write(str(e) + '\n')
-                f.write(traceback.format_exc())
+            print(f"[DEBUG] GPU {gpu}: Starting evaluation loop", flush=True)
+            for i, (task_id, episode) in enumerate(task_ids_and_episodes):
+                print(f"[DEBUG] GPU {gpu}: Starting task {task_id} episode {episode} ({i+1}/{len(task_ids_and_episodes)})", flush=True)
+                
+                try:
+                    self.logger.info(f"GPU {gpu}: task {task_id} episode {episode}")
+                    
+                    print(f"[DEBUG] GPU {gpu}: Calling evalute_single", flush=True)
+                    summary = self.evalute_single(model, task_suite, processor, task_id, episode, show_detail)
+                    print(f"[DEBUG] GPU {gpu}: evalute_single returned: {summary}", flush=True)
+                    
+                    print(f"[DEBUG] GPU {gpu}: Adding to summaries list", flush=True)
+                    summaries.append(summary)
+                    print(f"[DEBUG] GPU {gpu}: Successfully added summary, total summaries: {len(summaries)}", flush=True)
+                    
+                except Exception as task_error:
+                    print(f"[ERROR] GPU {gpu}: Task {task_id} episode {episode} failed: {str(task_error)}", flush=True)
+                    traceback.print_exc()
+                    continue
             
-    def evalute_single(self, model, processor, task_id, episode, show_detail):
-        task = self.task_suite.get_task(task_id)
+            print(f"[DEBUG] GPU {gpu}: All tasks completed successfully", flush=True)
+            
+        except Exception as e:
+            print(f"[ERROR] GPU {gpu}: Process failed with error: {str(e)}", flush=True)
+            print(f"[ERROR] GPU {gpu}: Error type: {type(e)}", flush=True)
+            print(f"[ERROR] GPU {gpu}: Full traceback:", flush=True)
+            traceback.print_exc()
+            
+            # Write error to file
+            try:
+                error_file = os.path.join(self.save_dir, f'error_gpu{gpu}_pid{os.getpid()}.log')
+                with open(error_file, 'w') as f:
+                    f.write(f"Process PID: {os.getpid()}\n")
+                    f.write(f"GPU: {gpu}\n")
+                    f.write(f"Error: {str(e)}\n")
+                    f.write(f"Error type: {type(e)}\n")
+                    f.write("Full traceback:\n")
+                    traceback.print_exc(file=f)
+            except Exception as file_error:
+                print(f"[ERROR] GPU {gpu}: Failed to write error file: {file_error}", flush=True)
+        
+        print(f"[DEBUG] GPU {gpu}: Process {os.getpid()} exiting", flush=True)
+
+
+    def evalute_single(self, model, task_suite, processor, task_id, episode, show_detail):
+        task = task_suite.get_task(task_id)
         env, task_description = get_libero_env(task, self.cfg.model_family, resolution=self.resize_size)
         env.seed(episode)
         env.reset()
@@ -270,7 +369,7 @@ class ParallelLiberoEvaluator:
         # for libero object, we reset the environment
         # so the initial state is not the same as the training data
         if not self.cfg.task_suite_name == 'libero_object':
-            initial_states = self.task_suite.get_task_init_states(task_id)
+            initial_states = task_suite.get_task_init_states(task_id)
             obs = env.set_init_state(initial_states[episode])
         
         replay_images, replay_wrist_images = [], []
@@ -353,29 +452,155 @@ class ParallelLiberoEvaluator:
         # list_physical devices can avoid cuda error, don't know why
         import tensorflow as tf
         tf.config.list_physical_devices("GPU")
+
+        #Polina added
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.set_device(0)
     
+    # def _build_policy(self, gpu):
+    #     print(f"[DEBUG] GPU {gpu}: _build_policy called", flush=True)
+        
+    #     self._set_gpu(gpu)
+
+    #     from experiments.robot.openvla_utils import get_processor
+    #     from experiments.robot.robot_utils import get_model, set_seed_everywhere
+    #     from prismatic.conf import ModelConfig
+        
+    #     # Fix model name in checkpoint if needed
+    #     import torch
+    #     print(f"[DEBUG] GPU {gpu}: Loading checkpoint to check base_vlm", flush=True)
+    #     checkpoint = torch.load(self.cfg.pretrained_checkpoint, map_location='cpu')
+        
+    #     if 'base_vlm' in checkpoint:
+    #         original_base_vlm = checkpoint['base_vlm']
+    #         print(f"[DEBUG] GPU {gpu}: Original base_vlm: {original_base_vlm}", flush=True)
+            
+    #         # Get available model configs
+    #         available_configs = set(ModelConfig._choice_registry.keys())
+            
+    #         # Check if the original name is already valid
+    #         if original_base_vlm in available_configs:
+    #             print(f"[DEBUG] GPU {gpu}: base_vlm is already valid", flush=True)
+    #         else:
+    #             # Use the fix_model_name function
+    #             fixed_base_vlm = fix_model_name(original_base_vlm)
+    #             print(f"[DEBUG] GPU {gpu}: Attempted fix: '{original_base_vlm}' -> '{fixed_base_vlm}'", flush=True)
+                
+    #             # Check if the fixed name is now valid
+    #             if fixed_base_vlm in available_configs:
+    #                 print(f"[DEBUG] GPU {gpu}: Successfully fixed base_vlm", flush=True)
+    #                 checkpoint['base_vlm'] = fixed_base_vlm
+                    
+    #                 # Save fixed checkpoint
+    #                 fixed_checkpoint_path = self.cfg.pretrained_checkpoint.replace('.pt', '_fixed.pt')
+    #                 torch.save(checkpoint, fixed_checkpoint_path)
+    #                 self.cfg.pretrained_checkpoint = fixed_checkpoint_path
+    #                 print(f"[DEBUG] GPU {gpu}: Saved fixed checkpoint: {fixed_checkpoint_path}", flush=True)
+    #             else:
+    #                 print(f"[ERROR] GPU {gpu}: Could not find valid model config for '{fixed_base_vlm}'", flush=True)
+    #                 print(f"[ERROR] GPU {gpu}: Available configs: {sorted(available_configs)}", flush=True)
+    #                 raise ValueError(f"Invalid base_vlm '{original_base_vlm}' and could not auto-fix to match available configs")
+        
+    #     set_seed_everywhere(self.cfg.seed)
+    #     model = get_model(self.cfg)
+        
+    #     if self.cfg.with_vqa:
+    #         from vla_scripts.openvla_with_vqa import OpenVLAWithVQA
+    #         model = OpenVLAWithVQA(model, self.cfg.check_catch, self.cfg.check_close, self.cfg.vqa_mode)
+
+    #     if self.cfg.model_family in ["openvla", "prismatic"]:
+    #         if hasattr(model, 'norm_stats'):
+    #             if self.cfg.unnorm_key not in model.norm_stats and f"{self.cfg.unnorm_key}_no_noops" in model.norm_stats:
+    #                 self.cfg.unnorm_key = f"{self.cfg.unnorm_key}_no_noops"
+    #             assert self.cfg.unnorm_key in model.norm_stats, f"Action un-norm key {self.cfg.unnorm_key} not found in VLA `norm_stats`!"
+
+    #     processor = None
+    #     if self.cfg.model_family == "openvla":
+    #         processor = get_processor(self.cfg)
+        
+    #     return model, processor
+
+
     def _build_policy(self, gpu):
+        print(f"[DEBUG] GPU {gpu}: _build_policy called", flush=True)
+        
+        print(f"[DEBUG] GPU {gpu}: Calling _set_gpu", flush=True)
         self._set_gpu(gpu)
+        print(f"[DEBUG] GPU {gpu}: _set_gpu completed", flush=True)
 
-        from experiments.robot.openvla_utils import get_processor
-        from experiments.robot.robot_utils import get_model, set_seed_everywhere
+        print(f"[DEBUG] GPU {gpu}: Starting imports", flush=True)
+        try:
+            from experiments.robot.openvla_utils import get_processor
+            print(f"[DEBUG] GPU {gpu}: openvla_utils import successful", flush=True)
+        except Exception as e:
+            print(f"[ERROR] GPU {gpu}: openvla_utils import failed: {e}", flush=True)
+            raise
 
+        try:
+            from experiments.robot.robot_utils import get_model, set_seed_everywhere
+            print(f"[DEBUG] GPU {gpu}: robot_utils import successful", flush=True)
+        except Exception as e:
+            print(f"[ERROR] GPU {gpu}: robot_utils import failed: {e}", flush=True)
+            raise
+
+        print(f"[DEBUG] GPU {gpu}: Setting seed", flush=True)
         set_seed_everywhere(self.cfg.seed)
-        model = get_model(self.cfg)
+        
+        print(f"[DEBUG] GPU {gpu}: Calling get_model with config:", flush=True)
+        print(f"[DEBUG] GPU {gpu}: - pretrained_checkpoint: {self.cfg.pretrained_checkpoint}", flush=True)
+        print(f"[DEBUG] GPU {gpu}: - model_family: {self.cfg.model_family}", flush=True)
+        print(f"[DEBUG] GPU {gpu}: - load_in_8bit: {self.cfg.load_in_8bit}", flush=True)
+        print(f"[DEBUG] GPU {gpu}: - load_in_4bit: {self.cfg.load_in_4bit}", flush=True)
+        
+        try:
+            model = get_model(self.cfg)
+            print(f"[DEBUG] GPU {gpu}: get_model successful, model type: {type(model)}", flush=True)
+        except Exception as e:
+            print(f"[ERROR] GPU {gpu}: get_model failed: {e}", flush=True)
+            print(f"[ERROR] GPU {gpu}: get_model traceback:", flush=True)
+            traceback.print_exc()
+            raise
+        
         if self.cfg.with_vqa:
-            from vla_scripts.openvla_with_vqa import OpenVLAWithVQA
-            model = OpenVLAWithVQA(model, self.cfg.check_catch, self.cfg.check_close, self.cfg.vqa_mode)
+            print(f"[DEBUG] GPU {gpu}: Loading VQA wrapper", flush=True)
+            try:
+                from vla_scripts.openvla_with_vqa import OpenVLAWithVQA
+                model = OpenVLAWithVQA(model, self.cfg.check_catch, self.cfg.check_close, self.cfg.vqa_mode)
+                print(f"[DEBUG] GPU {gpu}: VQA wrapper loaded successfully", flush=True)
+            except Exception as e:
+                print(f"[ERROR] GPU {gpu}: VQA wrapper failed: {e}", flush=True)
+                traceback.print_exc()
+                raise
 
         # [OpenVLA] Check that the model contains the action un-normalization key
         if self.cfg.model_family in ["openvla", "prismatic"]:
-            if self.cfg.unnorm_key not in model.norm_stats and f"{self.cfg.unnorm_key}_no_noops" in model.norm_stats:
-                self.cfg.unnorm_key = f"{self.cfg.unnorm_key}_no_noops"
-            assert self.cfg.unnorm_key in model.norm_stats, f"Action un-norm key {self.cfg.unnorm_key} not found in VLA `norm_stats`!"
+            print(f"[DEBUG] GPU {gpu}: Checking unnorm_key: {self.cfg.unnorm_key}", flush=True)
+            print(f"[DEBUG] GPU {gpu}: Available norm_stats keys: {list(model.norm_stats.keys()) if hasattr(model, 'norm_stats') else 'No norm_stats'}", flush=True)
+            
+            if hasattr(model, 'norm_stats'):
+                if self.cfg.unnorm_key not in model.norm_stats and f"{self.cfg.unnorm_key}_no_noops" in model.norm_stats:
+                    print(f"[DEBUG] GPU {gpu}: Using {self.cfg.unnorm_key}_no_noops instead", flush=True)
+                    self.cfg.unnorm_key = f"{self.cfg.unnorm_key}_no_noops"
+                
+                if self.cfg.unnorm_key not in model.norm_stats:
+                    print(f"[ERROR] GPU {gpu}: unnorm_key {self.cfg.unnorm_key} not found in norm_stats", flush=True)
+                    raise AssertionError(f"Action un-norm key {self.cfg.unnorm_key} not found in VLA `norm_stats`!")
+            else:
+                print(f"[ERROR] GPU {gpu}: Model has no norm_stats attribute", flush=True)
 
         processor = None
         if self.cfg.model_family == "openvla":
-            processor = get_processor(self.cfg)
+            print(f"[DEBUG] GPU {gpu}: Getting processor for openvla", flush=True)
+            try:
+                processor = get_processor(self.cfg)
+                print(f"[DEBUG] GPU {gpu}: Processor loaded successfully", flush=True)
+            except Exception as e:
+                print(f"[ERROR] GPU {gpu}: get_processor failed: {e}", flush=True)
+                traceback.print_exc()
+                raise
         
+        print(f"[DEBUG] GPU {gpu}: _build_policy completed successfully", flush=True)
         return model, processor
     
     def _add_observation(self, obs, replay_images, replay_wrist_images):
