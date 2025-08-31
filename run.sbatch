@@ -3,7 +3,7 @@
 #SBATCH --output=results/run-%J.out
 #SBATCH --error=results/run-%J.err
 #SBATCH --cpus-per-task=12
-#SBATCH --time=0:05:00
+#SBATCH --time=2:00:00
 #SBATCH --account=bfbo-dtai-gh
 #SBATCH --partition=ghx4
 #SBATCH --gres=gpu:h100:4
