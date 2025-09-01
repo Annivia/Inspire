@@ -428,6 +428,7 @@ class ParallelLiberoEvaluator:
     
 
     def _build_policy(self, gpu):
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
         self._set_gpu(gpu)
 

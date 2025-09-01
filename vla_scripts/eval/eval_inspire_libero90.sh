@@ -1,7 +1,7 @@
 export cuda_visible_devices=0,1,2,3
 
 num_gpus=4
-num_processes=4
+num_processes=48
 task_suite_names=(
     "libero_90"
     "libero_goal"
