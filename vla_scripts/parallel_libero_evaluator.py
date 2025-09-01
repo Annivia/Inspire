@@ -121,6 +121,9 @@ class GenerateConfig:
                  check_catch=True,
                  check_close=True,
                  vqa_mode='coarse_direction',
+                 collect_trajectory_data=False,
+                 trajectory_data_save_path="./trajectory_data",
+                 max_total_trajectories=None,  # For early stopping
                  ):
         self.model_family = model_family
         self.hf_token = hf_token
@@ -143,6 +146,9 @@ class GenerateConfig:
         self.check_catch = check_catch
         self.check_close = check_close
         self.vqa_mode = vqa_mode
+        self.collect_trajectory_data = collect_trajectory_data
+        self.trajectory_data_save_path = trajectory_data_save_path
+        self.max_total_trajectories = max_total_trajectories
 
         self.image_sequence_len = 1
         if self.obs_history == 2 or self.use_wrist_image:
@@ -202,6 +208,12 @@ class ParallelLiberoEvaluator:
 
         self.resize_size = get_image_resize_size(self.cfg)
 
+        # Data collector will be created in each subprocess to avoid pickle issues
+        if self.cfg.collect_trajectory_data:
+            print(f"[EVALUATOR] Trajectory data collection enabled (will create collector in each subprocess)")
+        else:
+            print(f"[EVALUATOR] Trajectory data collection disabled")
+
         # benchmark_dict = benchmark.get_benchmark_dict()
         # self.task_suite = benchmark_dict[self.cfg.task_suite_name]()
         # num_tasks_in_suite = self.task_suite.n_tasks
@@ -217,11 +229,25 @@ class ParallelLiberoEvaluator:
         
         task_ids_and_episodes_all_processes = [[] for _ in range(self.cfg.num_processes)]
         idx = 0
+        total_trajectories = 0
+        
         for task_id in range(num_tasks_in_suite):
             # task = self.task_suite.get_task(task_id).language
             for episode in range(self.cfg.num_trials_per_task):
+                # Early stopping check
+                if self.cfg.max_total_trajectories is not None and total_trajectories >= self.cfg.max_total_trajectories:
+                    print(f"[EVALUATOR] Early stopping: reached max_total_trajectories ({self.cfg.max_total_trajectories})")
+                    break
+                    
                 task_ids_and_episodes_all_processes[idx % self.cfg.num_processes].append((task_id, episode))
                 idx += 1
+                total_trajectories += 1
+                
+            # Break outer loop too if early stopping triggered
+            if self.cfg.max_total_trajectories is not None and total_trajectories >= self.cfg.max_total_trajectories:
+                break
+        
+        print(f"[EVALUATOR] Total trajectories to evaluate: {total_trajectories}")
 
         processes = []
         manager = multiprocessing.Manager()
@@ -269,9 +295,20 @@ class ParallelLiberoEvaluator:
             reset_logging()
             self._build_logger(mode='a')
 
+            # Create data collector in subprocess to avoid pickle issues
+            data_collector = None
+            if self.cfg.collect_trajectory_data:
+                print(f"[DEBUG] GPU {gpu}: Creating data collector in subprocess", flush=True)
+                from vla_scripts.trajectory_data_collector import TrajectoryDataCollector
+                data_collector = TrajectoryDataCollector(
+                    self.cfg.trajectory_data_save_path, 
+                    self.cfg.task_suite_name,
+                    process_id=gpu  # Use GPU ID as process ID
+                )
+
             for i, (task_id, episode) in enumerate(task_ids_and_episodes):
                 self.logger.info(f"GPU {gpu}: task {task_id} episode {episode}")
-                summary = self.evalute_single(model, task_suite, processor, task_id, episode, show_detail)
+                summary = self.evalute_single(model, task_suite, processor, task_id, episode, show_detail, data_collector)
                 summaries.append(summary)
                     
             
@@ -295,7 +332,7 @@ class ParallelLiberoEvaluator:
                 print(f"[ERROR] GPU {gpu}: Failed to write error file: {file_error}", flush=True)
 
 
-    def evalute_single(self, model, task_suite, processor, task_id, episode, show_detail):
+    def evalute_single(self, model, task_suite, processor, task_id, episode, show_detail, data_collector=None):
         task = task_suite.get_task(task_id)
         env, task_description = get_libero_env(task, self.cfg.model_family, resolution=self.resize_size)
         env.seed(episode)
@@ -311,6 +348,14 @@ class ParallelLiberoEvaluator:
         texts = []
         timestep = 0
         success = False
+        
+        # Enable data collection for this episode if collector is available
+        episode_data = []
+        if data_collector is not None and hasattr(model, 'enable_data_collection'):
+            print(f"[EVAL_SINGLE] Enabling data collection for task_{task_id}/episode_{episode}")
+            model.enable_data_collection()
+        else:
+            print(f"[EVAL_SINGLE] Data collection not available for task_{task_id}/episode_{episode}")
 
         while timestep < self.cfg.max_steps + self.cfg.num_steps_wait:
             if timestep < self.cfg.num_steps_wait:
@@ -320,9 +365,20 @@ class ParallelLiberoEvaluator:
                 continue
 
             observation = self._prepare_inputs(obs, replay_images, replay_wrist_images)
-            action, text = get_prismatic_vla_action(model, observation, task_description, 
-                                                    self.cfg.unnorm_key, center_crop=self.cfg.center_crop)
-            texts.append(text)
+            
+            # Use data collecting method if available
+            if data_collector is not None and hasattr(model, 'predict_action_with_data_collection'):
+                print(f"[EVAL_SINGLE] Using data collecting action prediction, timestep {timestep}")
+                action, step_data = model.predict_action_with_data_collection(
+                    observation, task_description, self.cfg.unnorm_key, center_crop=self.cfg.center_crop
+                )
+                texts.append(None)  # No text from data collecting method
+                print(f"[EVAL_SINGLE] Step data keys: {list(step_data.keys()) if step_data else 'None'}")
+            else:
+                print(f"[EVAL_SINGLE] Using standard action prediction, timestep {timestep}")
+                action, text = get_prismatic_vla_action(model, observation, task_description, 
+                                                        self.cfg.unnorm_key, center_crop=self.cfg.center_crop)
+                texts.append(text)
             if isinstance(action, list):
                 action = [normalize_gripper_action(a, binarize=True) for a in action]
             else:
@@ -363,6 +419,34 @@ class ParallelLiberoEvaluator:
         os.makedirs(video_save_dir, exist_ok=True)
         write_video(replay_images, os.path.join(video_save_dir, f'episode{episode}_success={success}.gif'), 
                     texts=None, fps=self.cfg.fps)
+        
+        # Save episode data if data collection is enabled
+        if data_collector is not None and hasattr(model, 'get_episode_data'):
+            print(f"[EVAL_SINGLE] Saving episode data for task_{task_id}/episode_{episode}")
+            try:
+                episode_hidden_states = model.get_episode_data()
+                print(f"[EVAL_SINGLE] Retrieved {len(episode_hidden_states)} timesteps of data")
+                
+                if len(episode_hidden_states) > 0:
+                    data_collector.save_episode_hidden_states(
+                        task_id=task_id,
+                        episode=episode,
+                        hidden_states_data=episode_hidden_states,
+                        task_description=task_description,
+                        success=success
+                    )
+                    print(f"[EVAL_SINGLE] Successfully saved episode data")
+                else:
+                    print(f"[EVAL_SINGLE] WARNING: No hidden states data to save")
+                
+                # Clear episode data from model
+                model.clear_episode_data()
+                print(f"[EVAL_SINGLE] Cleared episode data from model")
+                
+            except Exception as e:
+                print(f"[EVAL_SINGLE] ERROR saving episode data: {e}")
+                import traceback
+                traceback.print_exc()
         
         self.logger.info(f'Task {task_id} {task_description} episode {episode}: success {success}')
         return {"task_id": task_id, "task": task_description, "episode": episode, "success": success}
@@ -485,6 +569,19 @@ class ParallelLiberoEvaluator:
                 raise
         
         print(f"[DEBUG] GPU {gpu}: _build_policy completed successfully", flush=True)
+        
+        # Wrap model for data collection if enabled
+        if self.cfg.collect_trajectory_data:
+            print(f"[DEBUG] GPU {gpu}: Wrapping model for data collection", flush=True)
+            try:
+                from vla_scripts.data_collecting_vla import wrap_model_for_data_collection
+                model = wrap_model_for_data_collection(model)
+                print(f"[DEBUG] GPU {gpu}: Model wrapped successfully", flush=True)
+            except Exception as e:
+                print(f"[ERROR] GPU {gpu}: Failed to wrap model for data collection: {e}", flush=True)
+                traceback.print_exc()
+                raise
+        
         return model, processor
     
     def _add_observation(self, obs, replay_images, replay_wrist_images):
@@ -550,6 +647,9 @@ def main(args):
             vqa_mode=args.vqa_mode,
             obs_history=args.obs_history,
             use_wrist_image=args.use_wrist_image,
+            collect_trajectory_data=getattr(args, 'collect_trajectory_data', False),
+            trajectory_data_save_path=getattr(args, 'trajectory_data_save_path', './trajectory_data'),
+            max_total_trajectories=getattr(args, 'max_total_trajectories', None),
         )
         evaluator = ParallelLiberoEvaluator(cfg)
         evaluator.evaluate()
@@ -570,5 +670,14 @@ if __name__ == '__main__':
     parser.add_argument('--steps', nargs='+', type=int)
     parser.add_argument('--obs-history', type=int, default=1)
     parser.add_argument('--use-wrist-image', action='store_true')
+    
+    # Data collection arguments
+    parser.add_argument('--collect-trajectory-data', action='store_true', 
+                       help='Enable trajectory data collection for linear probe training')
+    parser.add_argument('--trajectory-data-save-path', type=str, default='./trajectory_data',
+                       help='Path to save trajectory data')
+    parser.add_argument('--max-total-trajectories', type=int, default=None,
+                       help='Maximum total trajectories to evaluate (for early stopping)')
+    
     args = parser.parse_args()
     main(args)
