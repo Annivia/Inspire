@@ -41,12 +41,12 @@ class TrajectoryDataCollector:
         success: bool
     ):
         """
-        Save hidden states for a single episode trajectory.
+        Save hidden states and actions for a single episode trajectory.
         
         Args:
             task_id: LIBERO task ID
             episode: Episode number
-            hidden_states_data: List of dicts, one per timestep, containing hidden states
+            hidden_states_data: List of dicts, one per timestep, containing hidden states and actions
             task_description: Task description string
             success: Whether the episode was successful
         """
@@ -59,31 +59,19 @@ class TrajectoryDataCollector:
             print(f"[DATA_COLLECTOR] WARNING: No hidden states data to save!")
             return
         
-        # Debug: Check first timestep structure
+        # Debug: Check if actions and vision features are present in the data
         first_step = hidden_states_data[0]
-        if 'hidden_states' in first_step:
-            print(f"[DATA_COLLECTOR] === DEBUGGING TIMESTEP DATA STRUCTURE ===")
-            print(f"[DATA_COLLECTOR] Hidden states layers in first timestep: {list(first_step['hidden_states'].keys())}")
-            print(f"[DATA_COLLECTOR] Total layers found: {len(first_step['hidden_states'])}")
-            
-            for layer_idx, layer_data in first_step['hidden_states'].items():
-                print(f"[DATA_COLLECTOR] === LAYER {layer_idx} ANALYSIS ===")
-                print(f"[DATA_COLLECTOR] Layer {layer_idx} data type: {type(layer_data)}")
-                
-                if isinstance(layer_data, np.ndarray):
-                    print(f"[DATA_COLLECTOR] Layer {layer_idx} numpy array shape: {layer_data.shape}")
-                    print(f"[DATA_COLLECTOR] Layer {layer_idx} numpy array dtype: {layer_data.dtype}")
-                elif isinstance(layer_data, list):
-                    print(f"[DATA_COLLECTOR] Layer {layer_idx} is a list with {len(layer_data)} items")
-                    for i, item in enumerate(layer_data):
-                        if hasattr(item, 'shape'):
-                            print(f"[DATA_COLLECTOR] Layer {layer_idx} item[{i}] shape: {item.shape}")
-                        else:
-                            print(f"[DATA_COLLECTOR] Layer {layer_idx} item[{i}] type: {type(item)}")
-                else:
-                    print(f"[DATA_COLLECTOR] Layer {layer_idx} unknown type: {type(layer_data)}")
+        print(f"[debug-action] First timestep keys: {list(first_step.keys())}")
+        
+        if 'actions' in first_step:
+            print(f"[debug-action] Actions found - shape: {np.array(first_step['actions']).shape}")
         else:
-            print(f"[DATA_COLLECTOR] WARNING: No 'hidden_states' key found in timestep data!")
+            print(f"[debug-action] WARNING: No 'actions' key found in timestep data!")
+            
+        if 'vision_features' in first_step:
+            print(f"[debug-visual] Vision features found - shape: {np.array(first_step['vision_features']).shape}")
+        else:
+            print(f"[debug-visual] WARNING: No 'vision_features' key found in timestep data!")
         
         with self.lock:
             try:
@@ -111,6 +99,48 @@ class TrajectoryDataCollector:
                     timestep_group.create_dataset('timestep_ids', data=np.arange(len(hidden_states_data)))
                     print(f"[DATA_COLLECTOR] Created timestep_ids dataset")
                     
+                    # Extract and save actions
+                    actions_list = []
+                    for timestep_data in hidden_states_data:
+                        if 'actions' in timestep_data:
+                            action = timestep_data['actions']
+                            # Ensure action is numpy array
+                            if not isinstance(action, np.ndarray):
+                                action = np.array(action)
+                            actions_list.append(action)
+                            print(f"[debug-action] Timestep {len(actions_list)-1}: action shape {action.shape}, values {action}")
+                        else:
+                            print(f"[debug-action] WARNING: No action found for timestep {len(actions_list)}")
+                    
+                    if actions_list:
+                        # Stack all actions into [timesteps, 7] array
+                        actions_array = np.stack(actions_list, axis=0)
+                        timestep_group.create_dataset('actions', data=actions_array)
+                        print(f"[debug-action] Saved actions array with shape: {actions_array.shape}")
+                    else:
+                        print(f"[debug-action] WARNING: No actions to save!")
+                    
+                    # Extract and save vision features
+                    vision_features_list = []
+                    for timestep_data in hidden_states_data:
+                        if 'vision_features' in timestep_data:
+                            vision_feat = timestep_data['vision_features']
+                            # Ensure vision features are numpy array
+                            if not isinstance(vision_feat, np.ndarray):
+                                vision_feat = np.array(vision_feat)
+                            vision_features_list.append(vision_feat)
+                            print(f"[debug-visual] Timestep {len(vision_features_list)-1}: vision shape {vision_feat.shape}, dtype {vision_feat.dtype}")
+                        else:
+                            print(f"[debug-visual] WARNING: No vision features found for timestep {len(vision_features_list)}")
+                    
+                    if vision_features_list:
+                        # Stack all vision features into [timesteps, num_patches, vision_dim] array
+                        vision_features_array = np.stack(vision_features_list, axis=0)
+                        timestep_group.create_dataset('vision_features', data=vision_features_array)
+                        print(f"[debug-visual] Saved vision features array with shape: {vision_features_array.shape}")
+                    else:
+                        print(f"[debug-visual] WARNING: No vision features to save!")
+                    
                     # Save hidden states (per layer with generation steps)
                     hidden_group = timestep_group.create_group('hidden_states')
                     
@@ -122,7 +152,6 @@ class TrajectoryDataCollector:
                         
                         for layer_idx in layer_indices:
                             layer_subgroup = hidden_group.create_group(f'layer_{layer_idx}')
-                            print(f"[DATA_COLLECTOR] === Processing Layer {layer_idx} ===")
                             
                             # Collect all timesteps for this layer
                             layer_data_all_timesteps = []
@@ -140,13 +169,10 @@ class TrajectoryDataCollector:
                                     if isinstance(data, np.ndarray):
                                         # Data is already stacked (all generation steps have same shape)
                                         timestep_subgroup.create_dataset('hidden_states', data=data)
-                                        print(f"[DATA_COLLECTOR] Layer {layer_idx}, timestep {t}: saved stacked array {data.shape}")
                                     elif isinstance(data, list):
                                         # Data is a list of generation steps with different shapes
-                                        print(f"[DATA_COLLECTOR] Layer {layer_idx}, timestep {t}: handling {len(data)} generation steps")
                                         for gen_step, gen_data in enumerate(data):
                                             timestep_subgroup.create_dataset(f'generation_step_{gen_step}', data=gen_data)
-                                            print(f"[DATA_COLLECTOR] Layer {layer_idx}, timestep {t}, gen_step {gen_step}: saved shape {gen_data.shape}")
                                     else:
                                         print(f"[DATA_COLLECTOR] ERROR: Unknown data type for layer {layer_idx}: {type(data)}")
                                 

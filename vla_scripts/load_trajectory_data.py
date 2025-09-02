@@ -35,6 +35,8 @@ def load_trajectory_dataset(
     Returns:
         Dictionary containing:
         - 'hidden_states': Dict[layer_idx][task_id][episode_id][timestep_id][generation_step] -> np.ndarray
+        - 'actions': Dict[task_id][episode_id] -> np.ndarray of shape [timesteps, 7]
+        - 'vision_features': Dict[task_id][episode_id] -> np.ndarray of shape [timesteps, num_patches, vision_dim]
         - 'metadata': List of episode metadata dictionaries
         - 'summary': Dataset summary statistics
     """
@@ -45,6 +47,8 @@ def load_trajectory_dataset(
     print(f"Loading trajectory data from: {data_path}")
     
     hidden_states = {}
+    actions = {}
+    vision_features = {}
     metadata = []
     
     with h5py.File(data_path, 'r') as f:
@@ -105,8 +109,30 @@ def load_trajectory_dataset(
                 successful_episodes += 1
                 metadata.append(episode_meta)
                 
-                # Load hidden states
+                # Load timesteps data
                 timesteps_group = f[episode_group]['timesteps']
+                
+                # Load actions if available
+                if 'actions' in timesteps_group:
+                    actions_data = np.array(timesteps_group['actions'])
+                    if task_id not in actions:
+                        actions[task_id] = {}
+                    actions[task_id][episode_id] = actions_data
+                    print(f"[debug-action] Loaded actions for task_{task_id}/episode_{episode_id}: shape {actions_data.shape}")
+                else:
+                    print(f"[debug-action] WARNING: No actions found for task_{task_id}/episode_{episode_id}")
+                
+                # Load vision features if available
+                if 'vision_features' in timesteps_group:
+                    vision_data = np.array(timesteps_group['vision_features'])
+                    if task_id not in vision_features:
+                        vision_features[task_id] = {}
+                    vision_features[task_id][episode_id] = vision_data
+                    print(f"[debug-visual] Loaded vision features for task_{task_id}/episode_{episode_id}: shape {vision_data.shape}")
+                else:
+                    print(f"[debug-visual] WARNING: No vision features found for task_{task_id}/episode_{episode_id}")
+                
+                # Load hidden states
                 if 'hidden_states' not in timesteps_group:
                     print(f"Warning: No hidden states found for task_{task_id}/episode_{episode_id}")
                     continue
@@ -183,6 +209,8 @@ def load_trajectory_dataset(
     
     return {
         'hidden_states': hidden_states,
+        'actions': actions,
+        'vision_features': vision_features,
         'metadata': metadata,
         'summary': summary
     }
@@ -257,6 +285,124 @@ def get_layer_data_flat(
     return stacked_hidden_states, sample_metadata if include_metadata else None
 
 
+def get_actions_data_flat(
+    dataset: Dict,
+    include_metadata: bool = True
+) -> Tuple[np.ndarray, Optional[List[Dict]]]:
+    """
+    Extract and flatten action data from all episodes.
+    
+    Args:
+        dataset: Dataset dictionary from load_trajectory_data()
+        include_metadata: Whether to return corresponding metadata
+        
+    Returns:
+        Tuple of (flattened_actions, metadata_list)
+        - flattened_actions: np.ndarray of shape (N, 7) where N is total timesteps across all episodes
+        - metadata_list: List of metadata dicts corresponding to each timestep
+    """
+    if 'actions' not in dataset or not dataset['actions']:
+        return np.array([]), []
+    
+    actions_data = dataset['actions']
+    all_actions = []
+    sample_metadata = []
+    
+    for task_id in actions_data:
+        for episode_id in actions_data[task_id]:
+            episode_actions = actions_data[task_id][episode_id]  # Shape: [timesteps, 7]
+            
+            # Find corresponding episode metadata
+            episode_meta = None
+            if include_metadata:
+                for meta in dataset['metadata']:
+                    if meta['task_id'] == task_id and meta['episode_id'] == episode_id:
+                        episode_meta = meta
+                        break
+            
+            all_actions.append(episode_actions)
+            
+            if include_metadata:
+                # Create metadata for each timestep
+                for timestep_id in range(episode_actions.shape[0]):
+                    sample_meta = {
+                        'task_id': task_id,
+                        'episode_id': episode_id,
+                        'timestep_id': timestep_id,
+                        'task_description': episode_meta['task_description'] if episode_meta else '',
+                        'success': episode_meta['success'] if episode_meta else False
+                    }
+                    sample_metadata.append(sample_meta)
+    
+    if not all_actions:
+        return np.array([]), []
+    
+    # Stack all actions
+    stacked_actions = np.vstack(all_actions)
+    
+    return stacked_actions, sample_metadata if include_metadata else None
+
+
+def get_vision_features_data_flat(
+    dataset: Dict,
+    include_metadata: bool = True
+) -> Tuple[np.ndarray, Optional[List[Dict]]]:
+    """
+    Extract and flatten vision encoder features data from all episodes.
+    
+    Args:
+        dataset: Dataset dictionary from load_trajectory_data()
+        include_metadata: Whether to return corresponding metadata
+        
+    Returns:
+        Tuple of (flattened_vision_features, metadata_list)
+        - flattened_vision_features: np.ndarray of shape (N, num_patches, vision_dim) where N is total timesteps
+        - metadata_list: List of metadata dicts corresponding to each timestep
+    """
+    if 'vision_features' not in dataset or not dataset['vision_features']:
+        return np.array([]), []
+    
+    vision_data = dataset['vision_features']
+    all_vision_features = []
+    sample_metadata = []
+    
+    for task_id in vision_data:
+        for episode_id in vision_data[task_id]:
+            episode_vision = vision_data[task_id][episode_id]  # Shape: [timesteps, num_patches, vision_dim]
+            
+            # Find corresponding episode metadata
+            episode_meta = None
+            if include_metadata:
+                for meta in dataset['metadata']:
+                    if meta['task_id'] == task_id and meta['episode_id'] == episode_id:
+                        episode_meta = meta
+                        break
+            
+            all_vision_features.append(episode_vision)
+            
+            if include_metadata:
+                # Create metadata for each timestep
+                for timestep_id in range(episode_vision.shape[0]):
+                    sample_meta = {
+                        'task_id': task_id,
+                        'episode_id': episode_id,
+                        'timestep_id': timestep_id,
+                        'task_description': episode_meta['task_description'] if episode_meta else '',
+                        'success': episode_meta['success'] if episode_meta else False,
+                        'num_patches': episode_vision.shape[1],
+                        'vision_dim': episode_vision.shape[2]
+                    }
+                    sample_metadata.append(sample_meta)
+    
+    if not all_vision_features:
+        return np.array([]), []
+    
+    # Stack all vision features
+    stacked_vision_features = np.vstack(all_vision_features)
+    
+    return stacked_vision_features, sample_metadata if include_metadata else None
+
+
 def print_dataset_structure(data_path: Union[str, Path]):
     """Print detailed structure of the HDF5 trajectory data file."""
     with h5py.File(data_path, 'r') as f:
@@ -307,6 +453,30 @@ def main():
         
         if metadata and len(metadata) > 0:
             print(f"First sample metadata: {metadata[0]}")
+    
+    # Example: Extract actions data
+    if 'actions' in dataset and dataset['actions']:
+        print(f"\nExample: Extracting Actions data...")
+        actions, actions_metadata = get_actions_data_flat(dataset)
+        print(f"Flattened actions shape: {actions.shape}")
+        print(f"Number of action timesteps: {len(actions_metadata) if actions_metadata else 0}")
+        
+        if actions_metadata and len(actions_metadata) > 0:
+            print(f"First action metadata: {actions_metadata[0]}")
+            print(f"First action values: {actions[0] if len(actions) > 0 else 'None'}")
+    
+    # Example: Extract vision features data
+    if 'vision_features' in dataset and dataset['vision_features']:
+        print(f"\nExample: Extracting Vision Features data...")
+        vision_features, vision_metadata = get_vision_features_data_flat(dataset)
+        print(f"Flattened vision features shape: {vision_features.shape}")
+        print(f"Number of vision timesteps: {len(vision_metadata) if vision_metadata else 0}")
+        
+        if vision_metadata and len(vision_metadata) > 0:
+            print(f"First vision metadata: {vision_metadata[0]}")
+            if len(vision_features) > 0:
+                print(f"Vision features shape per timestep: {vision_features[0].shape}")
+                print(f"Vision encoder output dimensions: patches={vision_features.shape[1]}, features={vision_features.shape[2]}")
 
 
 if __name__ == "__main__":

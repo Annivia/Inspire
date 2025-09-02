@@ -152,7 +152,7 @@ class DataCollectingVLA(OpenVLA):
         # Initialize collected data
         collected_data = {}
         
-        # Modified generation with hidden state collection
+        # Modified generation with hidden state and vision collection
         autocast_dtype = self.llm_backbone.half_precision_dtype
         print(f"[DATA_VLA] Using autocast dtype: {autocast_dtype}")
         
@@ -163,7 +163,15 @@ class DataCollectingVLA(OpenVLA):
         
         with torch.autocast("cuda", dtype=autocast_dtype, enabled=self.enable_mixed_precision_training):
             if self.collect_data:
-                print(f"[DATA_VLA] Generating with hidden states collection...")
+                print(f"[debug-visual] Generating with hidden states AND vision collection...")
+                
+                # Capture vision encoder features before generation
+                vision_features = self._extract_vision_features(pixel_values)
+                if vision_features is not None:
+                    collected_data['vision_features'] = vision_features
+                    print(f"[debug-visual] Captured vision features: shape {vision_features.shape}, dtype {vision_features.dtype}")
+                else:
+                    print(f"[debug-visual] WARNING: Failed to capture vision features!")
                 
                 # Enable hidden state output for data collection  
                 # Use same call as original predict_action: super(PrismaticVLM, self).generate
@@ -277,6 +285,50 @@ class DataCollectingVLA(OpenVLA):
             print(f"[DATA_VLA] Added step data to episode (now {len(self.current_episode_data)} steps)")
         
         return actions, collected_data if self.collect_data else {}
+    
+    def _extract_vision_features(self, pixel_values):
+        """
+        Extract vision encoder patch features from pixel values.
+        This captures the raw output from the vision backbone (DINOv2/CLIP/SigLIP etc.)
+        before projection to LLM embedding space.
+        """
+        try:
+            print(f"[debug-visual] Extracting vision encoder features...")
+            print(f"[debug-visual] Pixel values type: {type(pixel_values)}")
+            
+            if isinstance(pixel_values, torch.Tensor):
+                print(f"[debug-visual] Pixel values shape: {pixel_values.shape}")
+            elif isinstance(pixel_values, dict):
+                print(f"[debug-visual] Pixel values dict keys: {list(pixel_values.keys())}")
+                for k, v in pixel_values.items():
+                    print(f"[debug-visual] {k}: shape {v.shape}")
+            
+            # Run Visual Feature Extraction (same logic as PrismaticVLM.forward line 370-372)
+            with torch.set_grad_enabled(self.vision_backbone_requires_grad):
+                if isinstance(pixel_values, dict):
+                    patch_features = self.vision_backbone(pixel_values)
+                    print(f"[debug-visual] Dict input - vision backbone output shape: {patch_features.shape}")
+                else:
+                    patch_features = self.vision_backbone(pixel_values)
+                    print(f"[debug-visual] Tensor input - vision backbone output shape: {patch_features.shape}")
+            
+            print(f"[debug-visual] Vision backbone output dtype: {patch_features.dtype}")
+            print(f"[debug-visual] Vision backbone identifier: {getattr(self.vision_backbone, 'identifier', 'unknown')}")
+            
+            # Convert to numpy for storage (same approach as hidden states)
+            if patch_features.dtype == torch.bfloat16:
+                vision_features_np = patch_features.detach().cpu().float().numpy()
+            else:
+                vision_features_np = patch_features.detach().cpu().numpy()
+            
+            print(f"[debug-visual] Converted to numpy: shape {vision_features_np.shape}, dtype {vision_features_np.dtype}")
+            return vision_features_np
+            
+        except Exception as e:
+            print(f"[debug-visual] ERROR extracting vision features: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
 
 def wrap_model_for_data_collection(model):
