@@ -257,7 +257,7 @@ class ParallelLiberoEvaluator:
             gpu = gpus[idx % len(gpus)]
             self.logger.info(f'GPU {gpu}: {task_ids_and_episodes}')
             process = multiprocessing.Process(target=self.evaluate_episodes,
-                                              args=(gpu, task_ids_and_episodes, idx == 0, summaries))
+                                              args=(gpu, task_ids_and_episodes, idx == 0, summaries, idx))
             processes.append(process)
             
         for process in processes:
@@ -277,7 +277,7 @@ class ParallelLiberoEvaluator:
         self.logger.info(f"Overall success rate: {success_rate:.2f}")
         self.logger.info("Evaluation finished.")
 
-    def evaluate_episodes(self, gpu, task_ids_and_episodes, show_detail, summaries):
+    def evaluate_episodes(self, gpu, task_ids_and_episodes, show_detail, summaries, process_idx):
         os.environ["MUJOCO_GL"] = "egl" 
         os.environ["MUJOCO_EGL_DEVICE_ID"] = str(gpu)
         import sys
@@ -303,7 +303,7 @@ class ParallelLiberoEvaluator:
                 data_collector = TrajectoryDataCollector(
                     self.cfg.trajectory_data_save_path, 
                     self.cfg.task_suite_name,
-                    process_id=gpu  # Use GPU ID as process ID
+                    process_id=process_idx  # Use process index for unique files
                 )
 
             for i, (task_id, episode) in enumerate(task_ids_and_episodes):
