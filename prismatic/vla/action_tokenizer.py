@@ -187,7 +187,7 @@ class VQActionTokenizer(ActionTokenizer):
         # the number of future action horizon elements
         return self.vq_vae.input_dim_h - 1
 
-vq_vae_path_prior = "/projects/bfbo/xzhang42/Inspire/"
+vq_vae_path_prior = "/work/nvme/bfbo/xzhang42/Inspire/"
 
 ACTION_TOKENIZERS = {
     "action_tokenizer": ActionTokenizer,
