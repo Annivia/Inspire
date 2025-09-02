@@ -33,8 +33,13 @@ echo "Data Transfer Completed..."
 
 export PRISMATIC_DATA_ROOT=/work/nvme/bfbo/xzhang42/Inspire 
 
-bash /u/xzhang42/Inspire/vla_scripts/eval/eval_baseline_libero90.sh
+# bash /u/xzhang42/Inspire/vla_scripts/eval/eval_baseline_libero90.sh
+bash /u/xzhang42/Inspire/collect_trajectory_data.sh --num-tasks 10 --save-dir /work/nvme/bfbo/xzhang42/data/pilot
 
-echo "Transferring results..."
-rsync -av /work/nvme/bfbo/xzhang42/Inspire/results /projects/bfbo/xzhang42/Inspire
-echo "Results Transfer Completed..."
+# echo "Transferring results..."
+# rsync -av /work/nvme/bfbo/xzhang42/Inspire/results /projects/bfbo/xzhang42/Inspire
+# echo "Results Transfer Completed..."
+
+echo "Transferring data..."
+rsync -av /work/nvme/bfbo/xzhang42/data/pilot /projects/bfbo/xzhang42/Inspire
+echo "Data Transfer Completed..."

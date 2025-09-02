@@ -434,7 +434,6 @@ class ParallelLiberoEvaluator:
                         'episode_id': episode,
                         'env_seed': episode  # In LIBERO, env seed typically equals episode ID
                     }
-                    print(f"[debug-image] Creating image reconstruction clues: {image_reconstruction_clues}")
                     
                     data_collector.save_episode_hidden_states(
                         task_id=task_id,

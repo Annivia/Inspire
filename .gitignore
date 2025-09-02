@@ -7,6 +7,7 @@ pretrained/
 visualize/
 visualization/
 .hf_token
+vla_scripts/legacy
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

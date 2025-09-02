@@ -16,7 +16,7 @@ import argparse
 # Import the base trajectory loader
 import sys
 sys.path.append('/u/xzhang42/Inspire/vla_scripts')
-from load_trajectory_data import load_trajectory_dataset
+from vla_scripts.legacy.load_trajectory_data import load_trajectory_dataset
 
 
 class TrajectoryDataWithImages:
