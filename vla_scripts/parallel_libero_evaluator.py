@@ -428,12 +428,21 @@ class ParallelLiberoEvaluator:
                 print(f"[EVAL_SINGLE] Retrieved {len(episode_hidden_states)} timesteps of data")
                 
                 if len(episode_hidden_states) > 0:
+                    # Create minimal image reconstruction clues (just 3 integers!)
+                    image_reconstruction_clues = {
+                        'task_id': task_id,
+                        'episode_id': episode,
+                        'env_seed': episode  # In LIBERO, env seed typically equals episode ID
+                    }
+                    print(f"[debug-image] Creating image reconstruction clues: {image_reconstruction_clues}")
+                    
                     data_collector.save_episode_hidden_states(
                         task_id=task_id,
                         episode=episode,
                         hidden_states_data=episode_hidden_states,
                         task_description=task_description,
-                        success=success
+                        success=success,
+                        image_reconstruction_clues=image_reconstruction_clues
                     )
                     print(f"[EVAL_SINGLE] Successfully saved episode data")
                 else:

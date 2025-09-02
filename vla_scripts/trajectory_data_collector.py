@@ -38,7 +38,8 @@ class TrajectoryDataCollector:
         episode: int, 
         hidden_states_data: List[Dict],
         task_description: str,
-        success: bool
+        success: bool,
+        image_reconstruction_clues: Dict = None
     ):
         """
         Save hidden states and actions for a single episode trajectory.
@@ -92,6 +93,16 @@ class TrajectoryDataCollector:
                     meta_group.attrs['num_timesteps'] = len(hidden_states_data)
                     meta_group.attrs['libero_task_id'] = task_id
                     meta_group.attrs['libero_episode_id'] = episode
+                    
+                    # Save image reconstruction clues (minimal - just 3 integers per episode!)
+                    if image_reconstruction_clues:
+                        meta_group.attrs['img_task_id'] = image_reconstruction_clues.get('task_id', task_id)
+                        meta_group.attrs['img_episode_id'] = image_reconstruction_clues.get('episode_id', episode) 
+                        meta_group.attrs['img_env_seed'] = image_reconstruction_clues.get('env_seed', episode)
+                        print(f"[debug-image] Saved image reconstruction clues: {image_reconstruction_clues}")
+                    else:
+                        print(f"[debug-image] WARNING: No image reconstruction clues provided")
+                        
                     print(f"[DATA_COLLECTOR] Saved metadata")
                     
                     # Save timesteps data
