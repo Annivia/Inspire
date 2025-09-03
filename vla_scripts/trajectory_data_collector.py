@@ -60,20 +60,6 @@ class TrajectoryDataCollector:
             print(f"[DATA_COLLECTOR] WARNING: No hidden states data to save!")
             return
         
-        # Debug: Check if actions and vision features are present in the data
-        first_step = hidden_states_data[0]
-        print(f"[debug-action] First timestep keys: {list(first_step.keys())}")
-        
-        if 'actions' in first_step:
-            print(f"[debug-action] Actions found - shape: {np.array(first_step['actions']).shape}")
-        else:
-            print(f"[debug-action] WARNING: No 'actions' key found in timestep data!")
-            
-        if 'vision_features' in first_step:
-            print(f"[debug-visual] Vision features found - shape: {np.array(first_step['vision_features']).shape}")
-        else:
-            print(f"[debug-visual] WARNING: No 'vision_features' key found in timestep data!")
-        
         with self.lock:
             try:
                 with h5py.File(self.data_file, 'a') as f:
@@ -99,9 +85,8 @@ class TrajectoryDataCollector:
                         meta_group.attrs['img_task_id'] = image_reconstruction_clues.get('task_id', task_id)
                         meta_group.attrs['img_episode_id'] = image_reconstruction_clues.get('episode_id', episode) 
                         meta_group.attrs['img_env_seed'] = image_reconstruction_clues.get('env_seed', episode)
-                        print(f"[debug-image] Saved image reconstruction clues: {image_reconstruction_clues}")
                     else:
-                        print(f"[debug-image] WARNING: No image reconstruction clues provided")
+                        print(f"ERROR: No image reconstruction clues provided")
                         
                     print(f"[DATA_COLLECTOR] Saved metadata")
                     
@@ -119,17 +104,15 @@ class TrajectoryDataCollector:
                             if not isinstance(action, np.ndarray):
                                 action = np.array(action)
                             actions_list.append(action)
-                            print(f"[debug-action] Timestep {len(actions_list)-1}: action shape {action.shape}, values {action}")
                         else:
-                            print(f"[debug-action] WARNING: No action found for timestep {len(actions_list)}")
+                            print(f"ERROR: No action found for timestep {len(actions_list)}")
                     
                     if actions_list:
                         # Stack all actions into [timesteps, 7] array
                         actions_array = np.stack(actions_list, axis=0)
                         timestep_group.create_dataset('actions', data=actions_array)
-                        print(f"[debug-action] Saved actions array with shape: {actions_array.shape}")
                     else:
-                        print(f"[debug-action] WARNING: No actions to save!")
+                        print(f"ERROR: No actions to save!")
                     
                     # Extract and save vision features
                     vision_features_list = []
@@ -140,17 +123,15 @@ class TrajectoryDataCollector:
                             if not isinstance(vision_feat, np.ndarray):
                                 vision_feat = np.array(vision_feat)
                             vision_features_list.append(vision_feat)
-                            print(f"[debug-visual] Timestep {len(vision_features_list)-1}: vision shape {vision_feat.shape}, dtype {vision_feat.dtype}")
                         else:
-                            print(f"[debug-visual] WARNING: No vision features found for timestep {len(vision_features_list)}")
+                            print(f"ERROR: No vision features found for timestep {len(vision_features_list)}")
                     
                     if vision_features_list:
                         # Stack all vision features into [timesteps, num_patches, vision_dim] array
                         vision_features_array = np.stack(vision_features_list, axis=0)
                         timestep_group.create_dataset('vision_features', data=vision_features_array)
-                        print(f"[debug-visual] Saved vision features array with shape: {vision_features_array.shape}")
                     else:
-                        print(f"[debug-visual] WARNING: No vision features to save!")
+                        print(f"ERROR: No vision features to save!")
                     
                     # Save hidden states (per layer with generation steps)
                     hidden_group = timestep_group.create_group('hidden_states')
