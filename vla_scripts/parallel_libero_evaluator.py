@@ -295,14 +295,14 @@ class ParallelLiberoEvaluator:
             reset_logging()
             self._build_logger(mode='a')
 
-            # Create data collector in subprocess to avoid pickle issues
+            # Create optimized data collector in subprocess to avoid pickle issues
             data_collector = None
             if self.cfg.collect_trajectory_data:
-                print(f"[DEBUG] GPU {gpu}: Creating data collector in subprocess", flush=True)
-                from vla_scripts.trajectory_data_collector import TrajectoryDataCollector
-                data_collector = TrajectoryDataCollector(
-                    self.cfg.trajectory_data_save_path, 
-                    self.cfg.task_suite_name,
+                print(f"[DEBUG] GPU {gpu}: Creating optimized data collector in subprocess", flush=True)
+                from vla_scripts.trajectory_data_collector_optimized import OptimizedTrajectoryDataCollector
+                data_collector = OptimizedTrajectoryDataCollector(
+                    save_dir=self.cfg.trajectory_data_save_path,
+                    task_suite_name=self.cfg.task_suite_name,
                     process_id=process_idx  # Use process index for unique files
                 )
 
@@ -310,7 +310,12 @@ class ParallelLiberoEvaluator:
                 self.logger.info(f"GPU {gpu}: task {task_id} episode {episode}")
                 summary = self.evalute_single(model, task_suite, processor, task_id, episode, show_detail, data_collector)
                 summaries.append(summary)
-                    
+            
+            # Save accumulated data to temp chunks after all episodes are processed
+            if data_collector is not None:
+                print(f"[DEBUG] GPU {gpu}: Saving accumulated data to temp chunks", flush=True)
+                data_collector.save_chunk_to_temp()
+                print(f"[DEBUG] GPU {gpu}: Chunk saving completed", flush=True)
             
         except Exception as e:
             print(f"[ERROR] GPU {gpu}: Process failed with error: {str(e)}", flush=True)
@@ -435,9 +440,9 @@ class ParallelLiberoEvaluator:
                         'env_seed': episode  # In LIBERO, env seed typically equals episode ID
                     }
                     
-                    data_collector.save_episode_hidden_states(
+                    data_collector.save_episode_data(
                         task_id=task_id,
-                        episode=episode,
+                        episode_id=episode,
                         hidden_states_data=episode_hidden_states,
                         task_description=task_description,
                         success=success,

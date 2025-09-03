@@ -15,7 +15,7 @@
 #
 
 # Hardcoded configuration for Experiment 1
-DATA_PATH="/projects/bfbo/xzhang42/data/pilot/trajectory_data/trajectory_data_libero_90_robust.h5"
+DATA_PATH="/work/hdd/bfbo/xzhang42/trajectory_data_libero_90_robust.h5"
 EXPERIMENT=1
 OUTPUT_DIR="./results/experiment_1"
 LAYERS="0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31"  # All layers

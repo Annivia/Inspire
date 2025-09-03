@@ -1,6 +1,6 @@
 pip install huggingface_hub
 
-cd /projects/bfbo/xzhang42/Inspire/pretrained/
+cd /work/nvme/bfbo/xzhang42/Inspire/pretrained/
 current_dir=$(pwd)
 cd $HF_HOME/hub
 huggingface_cache_dir=$(pwd)
@@ -12,7 +12,7 @@ if [ ! -d "prism-qwen25-extra-dinosiglip-224px-0_5b" ]; then
 fi
 
 
-cd /projects/bfbo/xzhang42/Inspire/runs/
+cd /work/nvme/bfbo/xzhang42/Inspire/runs/
 
 current_dir=$(pwd)
 cd $HF_HOME/hub
@@ -29,7 +29,7 @@ if [ ! -d "minivla-inspire-libero-90" ]; then
     ln -s ${huggingface_cache_dir}/models--InspireVLA--minivla-inspire-libero-90/snapshots/b87707dd847b9361e267ee8ee2dbb98e852e13c1 ${current_dir}/minivla-inspire-libero-90
 fi
 
-cd /projects/bfbo/xzhang42/Inspire/pretrained/
+cd /work/nvme/bfbo/xzhang42/Inspire/pretrained/
 
 current_dir=$(pwd)
 cd $HF_HOME/hub
@@ -41,7 +41,7 @@ if [ ! -d "prism-qwen25-extra-dinosiglip-224px-0_5b" ]; then
     ln -s ${huggingface_cache_dir}/models--Stanford-ILIAD--prism-qwen25-extra-dinosiglip-224px-0_5b/snapshots/5cfd2cc6da00c06e0be7abf35d43ec792d8e9498 ${current_dir}/prism-qwen25-extra-dinosiglip-224px-0_5b
 fi
 
-cd /projects/bfbo/xzhang42/Inspire/
+cd /work/nvme/bfbo/xzhang42/Inspire/
 
 current_dir=$(pwd)
 cd $HF_HOME/hub

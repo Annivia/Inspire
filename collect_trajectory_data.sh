@@ -5,13 +5,13 @@
 
 set -e  # Exit on any error
 
-# Default parameters
-NUM_TASKS=10
+# Default parameters - Full dataset collection with optimized format
+NUM_TASKS=90
 SAVE_DIR=""
 TASK_SUITE="libero_90"
 NUM_TRIALS_PER_TASK=10
 NUM_GPUS=4
-NUM_PROCESSES=32
+NUM_PROCESSES=32  # RAM-limited, processes share GPUs
 RECONSTRUCT_IMAGES=false
 RECONSTRUCT_STATES=false
 
@@ -151,60 +151,61 @@ python /u/xzhang42/Inspire/vla_scripts/parallel_libero_evaluator.py \
 
 echo "Data collection completed successfully"
 
-echo "=== Step 2: Combining Trajectory Data Files ==="
-echo "Combining data files from multiple processes..."
+echo "=== Step 2: Combining Optimized Trajectory Data Files ==="
+echo "Combining chunk files from multiple processes into optimized format..."
 
-# Combine trajectory data files from multiple processes
-python /u/xzhang42/Inspire/vla_scripts/combine_trajectory_files.py \
-    --data-dir "$SAVE_DIR/trajectory_data" \
-    --task-suite-name "$TASK_SUITE" || {
-    echo "ERROR: File combination failed"
+# Combine trajectory data files into optimized multi-file format
+python /u/xzhang42/Inspire/vla_scripts/combine_optimized_trajectory_files.py \
+    --temp-dir "$SAVE_DIR/trajectory_data/temp_trajectory_processing" \
+    --output-dir "$SAVE_DIR/optimized_trajectory_data" \
+    --task-suite "$TASK_SUITE" \
+    --cleanup-temp || {
+    echo "ERROR: Optimized file combination failed"
     exit 1
 }
 
-echo "File combination completed successfully"
+echo "Optimized file combination completed successfully"
 
-# Verify combined file was created
-COMBINED_FILE="$SAVE_DIR/trajectory_data/trajectory_data_${TASK_SUITE}.h5"
-if [[ ! -f "$COMBINED_FILE" ]]; then
-    echo "ERROR: Combined trajectory file not found: $COMBINED_FILE"
+# Verify optimized format was created
+OPTIMIZED_DIR="$SAVE_DIR/optimized_trajectory_data"
+if [[ ! -d "$OPTIMIZED_DIR" ]]; then
+    echo "ERROR: Optimized trajectory directory not found: $OPTIMIZED_DIR"
     exit 1
 fi
 
-echo "✓ Combined trajectory file created: $COMBINED_FILE"
+echo "✓ Optimized trajectory data created: $OPTIMIZED_DIR"
 
-# Check file size and structure
-echo "=== Step 3: Verifying Trajectory Data ==="
+# Check optimized format structure
+echo "=== Step 3: Verifying Optimized Trajectory Data ==="
 python -c "
-import h5py
+import sys
+sys.path.append('/u/xzhang42/Inspire')
+from vla_scripts.load_optimized_trajectory_data import OptimizedTrajectoryLoader
+import json
 from pathlib import Path
 
-file_path = Path('$COMBINED_FILE')
-if file_path.exists():
-    print(f'File size: {file_path.stat().st_size / (1024*1024*1024):.2f} GB')
-    
-    with h5py.File(file_path, 'r') as f:
-        print(f'Task groups: {len(f.keys())}')
-        total_episodes = sum(len(f[task_key].keys()) for task_key in f.keys() if task_key.startswith('task_'))
-        print(f'Total episodes: {total_episodes}')
+optimized_dir = Path('$OPTIMIZED_DIR')
+if optimized_dir.exists():
+    try:
+        loader = OptimizedTrajectoryLoader(optimized_dir)
+        info = loader.get_dataset_info()
         
-        # Sample first episode metadata
-        if len(f.keys()) > 0:
-            first_task = list(f.keys())[0]
-            if len(f[first_task].keys()) > 0:
-                first_episode = list(f[first_task].keys())[0]
-                metadata_path = f'{first_task}/{first_episode}/metadata'
-                if metadata_path in f:
-                    metadata = f[metadata_path]
-                    print(f'Sample episode - Task: {metadata.attrs.get(\"task_description\", \"N/A\")}')
-                    print(f'Sample episode - Success: {metadata.attrs.get(\"success\", \"N/A\")}')
-                    print(f'Sample episode - Timesteps: {metadata.attrs.get(\"num_timesteps\", \"N/A\")}')
-        print('✓ Trajectory data verification completed')
+        print(f'✓ Optimized trajectory data verification completed')
+        print(f'Dataset info:')
+        print(json.dumps(info, indent=2))
+        
+        # Calculate total file size
+        total_size = sum(f.stat().st_size for f in optimized_dir.rglob('*.h5'))
+        print(f'Total optimized data size: {total_size / (1024*1024*1024):.2f} GB')
+        
+    except Exception as e:
+        print(f'ERROR: Failed to verify optimized data: {e}')
+        exit(1)
 else:
-    print('ERROR: Combined file not found')
+    print('ERROR: Optimized directory not found')
     exit(1)
 " || {
-    echo "ERROR: Data verification failed"
+    echo "ERROR: Optimized data verification failed"
     exit 1
 }
 
@@ -252,11 +253,14 @@ else
 fi
 
 echo "=== Step 5: Final Summary ==="
-echo "✅ Trajectory data collection pipeline completed successfully!"
+echo "✅ Optimized trajectory data collection pipeline completed successfully!"
 echo ""
 echo "Data location: $SAVE_DIR"
-echo "├── trajectory_data/"
-echo "│   └── trajectory_data_${TASK_SUITE}.h5  # Main HDF5 dataset"
+echo "├── optimized_trajectory_data/            # Optimized multi-file format"
+echo "│   ├── hidden_states/                    # Individual layer files (32x I/O reduction!)"
+echo "│   ├── actions.h5                        # Action data"
+echo "│   ├── vision_features.h5                # Vision encoder features"
+echo "│   └── episode_index.h5                  # Episode metadata & indexing"
 echo "├── results/                              # Evaluation results"
 
 if [[ "$RECONSTRUCT_IMAGES" == "true" ]]; then

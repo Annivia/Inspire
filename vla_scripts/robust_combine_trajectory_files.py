@@ -21,7 +21,7 @@ from typing import List, Dict, Tuple
 # HARDCODED CONFIGURATION
 DATA_DIR = "/work/hdd/bfbo/trajectory_data"
 TASK_SUITE_NAME = "libero_90"
-OUTPUT_FILE = "/projects/bfbo/xzhang42/data/pilot/trajectory_data/trajectory_data_libero_90_robust.h5"
+OUTPUT_FILE = "/work/hdd/bfbo/trajectory_data/trajectory_data_libero_90_robust.h5"
 DEBUG = True
 
 # Color codes for output
