@@ -43,11 +43,15 @@ class OptimizedTrajectoryLoader:
         # Load episode index
         self._load_episode_index()
         
+        # Set available attributes for easy access
+        self.available_layers = self.summary.get('layer_indices', [])
+        self.available_generation_steps = self.summary.get('generation_steps', [])
+        
         print(f"[OPTIMIZED_LOADER] Loaded dataset: {self.data_dir}")
         print(f"[OPTIMIZED_LOADER] Episodes: {len(self.episode_index)}")
-        print(f"[OPTIMIZED_LOADER] Available layers: {self.summary['layer_indices']}")
-        if 'generation_steps' in self.summary:
-            print(f"[OPTIMIZED_LOADER] Available generation steps: {self.summary['generation_steps']}")
+        print(f"[OPTIMIZED_LOADER] Available layers: {self.available_layers}")
+        if self.available_generation_steps:
+            print(f"[OPTIMIZED_LOADER] Available generation steps: {self.available_generation_steps}")
         print(f"[OPTIMIZED_LOADER] Total samples: {self.summary['total_samples']}")
     
     def _scan_directory_structure(self) -> Dict:
@@ -223,25 +227,47 @@ class OptimizedTrajectoryLoader:
         
         print(f"[OPTIMIZED_LOADER] Loading {len(filtered_episodes)} episodes for layer {layer_idx}")
         
-        # Load layer data
-        layer_path = self.data_dir / "hidden_states" / f"layer_{layer_idx:02d}.h5"
+        # Load layer data from generation step files (new format)
+        print(f"[OPTIMIZED_LOADER] Loading layer {layer_idx} from generation step files...")
+        
+        # Collect sample indices for filtered episodes
+        sample_indices = []
+        for _, episode in filtered_episodes.iterrows():
+            sample_indices.extend(range(episode['start_idx'], episode['end_idx'] + 1))
+        
+        # Load data from all generation steps for this layer and concatenate
+        all_layer_data = []
+        generation_steps = sorted(self.available_generation_steps)
         
         start_time = time.time()
-        with h5py.File(layer_path, 'r') as f:
-            layer_dataset = f['hidden_states']
+        for gen_step in generation_steps:
+            gen_step_path = self.data_dir / "hidden_states" / f"generation_step_{gen_step}.h5"
             
-            # Collect sample indices for filtered episodes
-            sample_indices = []
-            for _, episode in filtered_episodes.iterrows():
-                sample_indices.extend(range(episode['start_idx'], episode['end_idx'] + 1))
-            
-            # Load selected samples efficiently
-            if len(sample_indices) < len(layer_dataset) * 0.5:
-                # If loading less than 50% of data, use fancy indexing
-                hidden_states = layer_dataset[sample_indices]
-            else:
-                # If loading most of the data, load all and slice
-                hidden_states = layer_dataset[:][sample_indices]
+            if gen_step_path.exists():
+                with h5py.File(gen_step_path, 'r') as f:
+                    layer_dataset_name = f'layer_{layer_idx:02d}'
+                    if layer_dataset_name in f:
+                        layer_dataset = f[layer_dataset_name]
+                        
+                        # Load selected samples efficiently
+                        if len(sample_indices) < len(layer_dataset) * 0.5:
+                            # If loading less than 50% of data, use fancy indexing
+                            gen_step_data = layer_dataset[sample_indices]
+                        else:
+                            # If loading most of the data, load all and slice
+                            gen_step_data = layer_dataset[:][sample_indices]
+                        
+                        all_layer_data.append(gen_step_data)
+        
+        # Concatenate data from all generation steps along the last dimension
+        if all_layer_data:
+            # Shape will be [samples, 1, hidden_dim] for each generation step
+            # Stack along a new axis to create [samples, generation_steps, 1, hidden_dim]
+            hidden_states = np.stack(all_layer_data, axis=1)  
+            # Reshape to [samples, generation_steps * hidden_dim] for flat features
+            hidden_states = hidden_states.reshape(hidden_states.shape[0], -1)
+        else:
+            hidden_states = np.array([])
         
         load_time = time.time() - start_time
         print(f"[OPTIMIZED_LOADER] Loaded layer {layer_idx}: {hidden_states.shape} in {load_time:.2f}s")

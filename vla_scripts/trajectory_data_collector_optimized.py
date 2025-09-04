@@ -123,6 +123,8 @@ class OptimizedTrajectoryDataCollector:
                             if not isinstance(layer_hidden_states, np.ndarray):
                                 layer_hidden_states = np.array(layer_hidden_states)
                             
+                            print(f"[COLLECTOR_DEBUG] Process {self.process_id}: Gen step {generation_step}, Layer {layer_idx}: shape {layer_hidden_states.shape}")
+                            
                             # Store layer activations - consistent [1, hidden_dim] shape per layer per generation step
                             # No flattening needed since dimensions are now consistent
                             self.accumulated_data['hidden_states'][generation_step][layer_idx].append(layer_hidden_states)
@@ -198,32 +200,42 @@ class OptimizedTrajectoryDataCollector:
                         # Save each layer's data for this generation step
                         for layer_idx, layer_data in layers_data.items():
                             if layer_data:
-                                layer_array = np.stack(layer_data, axis=0)
                                 
-                                # Determine optimal chunking for 3D array [samples, batch_size, hidden_dim]
-                                chunk_size = min(1000, layer_array.shape[0])
-                                if len(layer_array.shape) == 3:
-                                    # Shape: [samples, 1, hidden_dim]
-                                    chunks = (chunk_size, layer_array.shape[1], layer_array.shape[2])
-                                elif len(layer_array.shape) == 2:
-                                    # Shape: [samples, hidden_dim]
-                                    chunks = (chunk_size, layer_array.shape[1])
-                                else:
-                                    chunks = True
+                                # Check shapes before stacking
+                                sample_shapes = [sample.shape for sample in layer_data[:3]]  # Check first 3
                                 
-                                f.create_dataset(f'layer_{layer_idx:02d}',
-                                               data=layer_array,
-                                               chunks=chunks,
-                                               **compression_kwargs)
+                                try:
+                                    layer_array = np.stack(layer_data, axis=0)
+                                    
+                                    # Determine optimal chunking based on actual array shape
+                                    chunk_size = min(1000, layer_array.shape[0])
+                                    if len(layer_array.shape) == 4:
+                                        # Shape: [samples, 1, seq_len, hidden_dim] (old format - should not happen after fix)
+                                        chunks = (chunk_size, layer_array.shape[1], layer_array.shape[2], layer_array.shape[3])
+                                    elif len(layer_array.shape) == 3:
+                                        # Shape: [samples, 1, hidden_dim] (expected after fix)
+                                        chunks = (chunk_size, layer_array.shape[1], layer_array.shape[2])
+                                    elif len(layer_array.shape) == 2:
+                                        # Shape: [samples, hidden_dim] (if we squeeze further)
+                                        chunks = (chunk_size, layer_array.shape[1])
+                                    else:
+                                        chunks = True
+                                    
+                                    f.create_dataset(f'layer_{layer_idx:02d}',
+                                                   data=layer_array,
+                                                   chunks=chunks,
+                                                   **compression_kwargs)
+                                    
+                                except Exception as e:
+                                    print(f"[COLLECTOR_ERROR] Process {self.process_id}: Failed at gen step {generation_step}, layer {layer_idx}: {e}")
+                                    print(f"[COLLECTOR_ERROR] Process {self.process_id}: Sample shapes were: {[s.shape for s in layer_data]}")
+                                    raise e
                     
-                    print(f"[OPTIMIZED_COLLECTOR] Saved generation step {generation_step} with {len(layers_data)} layers")
-            
             # Save episode metadata
             episodes_path = self.temp_dir / "episodes_chunk.json"
             with open(episodes_path, 'w') as f:
                 json.dump(self.accumulated_data['episodes'], f, indent=2)
             
-            print(f"[OPTIMIZED_COLLECTOR] Saved {len(self.accumulated_data['episodes'])} episode metadata")
             
             # Create processing manifest
             manifest = {
@@ -364,9 +376,16 @@ def combine_chunks_to_optimized_format(
                     if step_data[layer_idx]:
                         combined_layer = np.concatenate(step_data[layer_idx], axis=0)
                         
-                        # Optimize chunking for sequential access
+                        # Optimize chunking for sequential access - handle 3D arrays
                         chunk_size = min(10000, combined_layer.shape[0])
-                        chunks = (chunk_size, combined_layer.shape[1]) if len(combined_layer.shape) > 1 else True
+                        if len(combined_layer.shape) == 3:
+                            # Shape: [samples, 1, hidden_dim]
+                            chunks = (chunk_size, combined_layer.shape[1], combined_layer.shape[2])
+                        elif len(combined_layer.shape) == 2:
+                            # Shape: [samples, hidden_dim]
+                            chunks = (chunk_size, combined_layer.shape[1])
+                        else:
+                            chunks = True
                         
                         f.create_dataset(f'layer_{layer_idx:02d}',
                                        data=combined_layer,

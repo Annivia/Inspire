@@ -165,7 +165,6 @@ class DataCollectingVLA(OpenVLA):
                 # Extract hidden states from all layers
                 if hasattr(generated_output, 'hidden_states') and generated_output.hidden_states is not None:
                     
-                    print(f"[DEBUG_HIDDEN] Generated output has {len(generated_output.hidden_states)} generation steps")
                     
                     # CORRECTED: Organize by generation_step -> layer (not layer -> generation_step)
                     hidden_states = {}
@@ -175,22 +174,30 @@ class DataCollectingVLA(OpenVLA):
                         if step_idx not in hidden_states:
                             hidden_states[step_idx] = {}
                         
-                        print(f"[DEBUG_HIDDEN] Generation step {step_idx}: {len(step_hidden)} layers")
                         
                         # Process each layer in this generation step
                         for layer_idx, layer_hidden in enumerate(step_hidden):
                             
-                            print(f"[DEBUG_HIDDEN] Step {step_idx}, Layer {layer_idx}: original shape {layer_hidden.shape}, dtype {layer_hidden.dtype}")
                             
                             # For Step 0, extract only the final token to match Steps 1-6 dimensions
                             if step_idx == 0 and len(layer_hidden.shape) == 3:
-                                # Extract final token: [1, seq_len, hidden] -> [1, hidden]
+                                # Extract final token: [1, seq_len, hidden] -> [1, hidden]  
                                 current_token_hidden = layer_hidden[:, -1, :]
-                                print(f"[DEBUG_HIDDEN] Step {step_idx}, Layer {layer_idx}: extracted final token shape {current_token_hidden.shape}")
-                            else:
-                                # Steps 1-6 are already single tokens
+                            elif step_idx == 0:
                                 current_token_hidden = layer_hidden
-                                print(f"[DEBUG_HIDDEN] Step {step_idx}, Layer {layer_idx}: using original shape {current_token_hidden.shape}")
+                            else:
+                                # Steps 1-6: should be single tokens with shape [1, 1, 896], need to squeeze to [1, 896]
+                                if len(layer_hidden.shape) == 3:
+                                    if layer_hidden.shape[1] == 1:
+                                        # Single token: [1, 1, hidden] -> [1, hidden]
+                                        current_token_hidden = layer_hidden.squeeze(1)  # Remove middle dimension
+                                    else:
+                                        # Multiple tokens, extract final
+                                        current_token_hidden = layer_hidden[:, -1, :]
+                                else:
+                                    # Already 2D
+                                    current_token_hidden = layer_hidden
+                                    # print(f"[DEBUG_HIDDEN] Step {step_idx}, Layer {layer_idx}: using original 2D shape {current_token_hidden.shape}")
                             
                             # Store as numpy array (detach from GPU)
                             # Convert BFloat16 to Float32 since NumPy doesn't support BFloat16
@@ -198,8 +205,6 @@ class DataCollectingVLA(OpenVLA):
                                 layer_data = current_token_hidden.detach().cpu().float().numpy()
                             else:
                                 layer_data = current_token_hidden.detach().cpu().numpy()
-                            
-                            print(f"[DEBUG_HIDDEN] Step {step_idx}, Layer {layer_idx}: final numpy shape {layer_data.shape}, flattened size {layer_data.size}")
 
                             # CORRECTED: hidden_states[generation_step][layer] structure
                             hidden_states[step_idx][layer_idx] = layer_data
