@@ -25,7 +25,7 @@ import time
 sys.path.append('/u/xzhang42/Inspire')
 sys.path.append('/u/xzhang42/Inspire/vla_scripts')
 
-from vla_scripts.legacy.load_trajectory_data import (
+from vla_scripts.load_optimized_trajectory_data import (
     load_trajectory_dataset, get_layer_data_flat, get_actions_data_flat
 )
 from probing.linear_probe import run_probe_with_baselines, save_probe_results
