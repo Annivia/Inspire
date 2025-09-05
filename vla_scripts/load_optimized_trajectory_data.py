@@ -435,16 +435,13 @@ def load_trajectory_dataset(data_path: Union[str, Path],
         if layers is None:
             layers = loader.summary['layer_indices']
         
-        # Load data organized by generation step
-        for gen_step in generation_steps:
-            if gen_step in loader.summary['generation_steps']:
-                step_data, _ = loader.load_generation_step_data(gen_step, tasks=tasks, episodes=episodes, successful_only=successful_only)
-                
-                # Reorganize to match legacy format: hidden_states[layer_idx]
-                for layer_idx in layers:
-                    if layer_idx in step_data:
-                        layer_key = f"layer_{layer_idx}_step_{gen_step}" if len(generation_steps) > 1 else layer_idx
-                        hidden_states[layer_key] = step_data[layer_idx]
+        # Load data by layer (existing method already handles generation steps correctly)
+        for layer_idx in layers:
+            if layer_idx in loader.summary['layer_indices']:
+                layer_data, _ = loader.load_layer_data(layer_idx, tasks, episodes, successful_only)
+                hidden_states[layer_idx] = layer_data
+            else:
+                print(f"WARNING: Layer {layer_idx} not available in dataset")
         
     else:
         # LEGACY FORMAT: Load by layer

@@ -15,10 +15,10 @@
 #
 
 # Hardcoded configuration for Experiment 1
-DATA_PATH="/work/hdd/bfbo/xzhang42/trajectory_data_libero_90_robust.h5"
+DATA_PATH="/work/nvme/bfbo/xzhang42/data/pilot_test/optimized_trajectory_data"
 EXPERIMENT=1
 OUTPUT_DIR="./results/experiment_1"
-LAYERS="0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31"  # All layers
+LAYERS="0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24"  # All 25 layers (0-24)
 GENERATION_STEPS="0"  # Full input processing step
 TEST_SIZE=0.2
 RANDOM_SEED=42
@@ -48,7 +48,7 @@ print_info ""
 print_info "Configuration:"
 print_info "  Data: $DATA_PATH"
 print_info "  Output: $OUTPUT_DIR"
-print_info "  Layers: All available (0-31)"
+print_info "  Layers: All available (0-24, 25 total layers)"
 print_info "  Generation steps: 0 (full input processing)"
 print_info "  Test size: $TEST_SIZE"
 print_info "  Random seed: $RANDOM_SEED"
@@ -65,8 +65,8 @@ if [[ ! -f "probe.py" ]]; then
     exit 1
 fi
 
-if [[ ! -f "$DATA_PATH" ]]; then
-    print_error "Data file not found: $DATA_PATH"
+if [[ ! -d "$DATA_PATH" ]]; then
+    print_error "Data directory not found: $DATA_PATH"
     exit 1
 fi
 
@@ -147,7 +147,7 @@ if [[ $PROBE_EXIT_CODE -eq 0 ]]; then
     print_info "  - plots/experiment_1_*.png (visualization plots)"
     print_info ""
     print_info "The results compare linear separability across:"
-    print_info "  • All transformer layers (0-31)"
+    print_info "  • All transformer layers (0-24, 25 total layers)"
     print_info "  • All three baseline conditions"
     print_info "  • R2 scores show how well actions are linearly accessible from hidden states"
     

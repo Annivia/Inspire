@@ -8,9 +8,9 @@ This is the **InSpire** repository - an implementation of Vision-Language-Action
 
 ### Current Development Goal
 
-**PRIORITY: Optimize trajectory data storage and loading performance before implementing linear probing experiments.** The current HDF5 format with deep nesting (6+ levels) and 576,000+ tiny datasets is causing severe loading bottlenecks (60s per episode). Need to redesign the storage format for efficient access patterns before proceeding with probing experiments.
+**PRIORITY: Implement linear probing experiments on optimized trajectory data.** \
 
-**Next Priority**: After storage optimization, implement the four probing experiments specified in `probing/README.md`:
+**Current Focus**: Implement the four probing experiments specified in `probing/README.md`:
 
 1. **Experiment 1**: [Hidden state] -> actions - Linear regression probes for every layer's hidden states
 2. **Experiment 2**: [Vision encoder outputs] -> actions - Linear regression probes for vision patch features  
@@ -29,65 +29,25 @@ The system provides complete multi-modal trajectory datasets stored in HDF5 form
 4. ✅ **Images**: Can be reconstructed using ultra-efficient minimal clues (3 integers per episode) via LIBERO
 5. ✅ **Simulator states**: Object positions, robot joint states, end-effector poses, and complete physics metadata (reconstructable)
 
-### Data Structure (HDF5 Format)
-```
-trajectory_data_<suite>.h5
-├── task_0/episode_0/
-│   ├── metadata/  # Group with attributes
-│   │   ├── @success: bool
-│   │   ├── @task_description: str  
-│   │   ├── @num_timesteps: int
-│   │   ├── @libero_task_id: int
-│   │   ├── @libero_episode_id: int
-│   │   ├── @img_task_id: int        # Image reconstruction clues (3 integers per episode)
-│   │   ├── @img_episode_id: int
-│   │   └── @img_env_seed: int
-│   └── timesteps/
-│       ├── timestep_ids (array: [0, 1, 2, ...])
-│       ├── actions (array: [timesteps, 7])  # Robot control vectors
-│       ├── vision_features (array: [timesteps, num_patches, vision_dim])  # Vision encoder outputs  
-│       └── hidden_states/
-│           └── layer_N/
-│               └── timestep_T/
-│                   ├── generation_step_0/  # Full input processing  
-│                   ├── generation_step_1/  # 1st action token
-│                   └── generation_step_S/  # Sth action token
-```
 
-### Data Storage Optimization (CURRENT FOCUS)
+### Data Storage
 
-**CRITICAL CORRECTION:** There was a fundamental misunderstanding of what "hidden states" means in VLA trajectory data collection. This has been corrected below.
-
-**Previous Misunderstanding:** Assumed "hidden states" referred to sequence context data that grows over time, causing variable-sized arrays and dimension mismatch errors.
-
-**Correct Definition:** "Hidden states" refers to **layer activations during the 7 action token generation steps**. For each timestep, when the VLA model generates 7 action tokens, we capture the hidden state from each transformer layer during each token generation step.
-
-**Performance Issues with Current Format:**
-- Deep HDF5 nesting (6+ levels) causing 60s+ per episode loading times
-- ~576,000 tiny datasets instead of large contiguous arrays
-- 716GB monolithic file requiring full load for single-layer probing
-- **CRITICAL BUG**: VLA model collecting inconsistent hidden state dimensions due to sequence length confusion
-
-**Optimized Multi-File Format Design (CORRECTED):**
+**Structure Solution**: Multi-file format organized by generation steps for efficient layer-wise loading:
 ```
 /optimized_trajectory_data/
 ├── actions.h5                    # [N_samples, 7] - The 7 generated action tokens
 ├── hidden_states/
-│   ├── generation_step_0.h5     # [N_samples, num_layers, hidden_dim] - Layer activations when generating token 0
-│   ├── generation_step_1.h5     # [N_samples, num_layers, hidden_dim] - Layer activations when generating token 1
-│   ├── generation_step_2.h5     # [N_samples, num_layers, hidden_dim] - Layer activations when generating token 2
-│   ├── generation_step_3.h5     # [N_samples, num_layers, hidden_dim] - Layer activations when generating token 3
-│   ├── generation_step_4.h5     # [N_samples, num_layers, hidden_dim] - Layer activations when generating token 4
-│   ├── generation_step_5.h5     # [N_samples, num_layers, hidden_dim] - Layer activations when generating token 5
-│   └── generation_step_6.h5     # [N_samples, num_layers, hidden_dim] - Layer activations when generating token 6
+│   ├── generation_step_0.h5     # Contains datasets: layer_00, layer_01, ..., layer_24
+│   ├── generation_step_1.h5     # Each layer dataset: [N_samples, hidden_dim]
+│   ├── generation_step_2.h5     # Layer activations when generating tokens 0-6
+│   ├── generation_step_3.h5     # Separate file per generation step for memory efficiency
+│   ├── generation_step_4.h5
+│   ├── generation_step_5.h5
+│   └── generation_step_6.h5
 ├── vision_features.h5           # [N_samples, patches, vision_dim] - Vision encoder outputs
-└── episode_index.h5             # DataFrame with episode metadata + sample indexing
+├── episode_index.h5             # DataFrame with episode metadata + sample indexing
+└── dataset_summary.json         # Dataset metadata and statistics
 ```
-
-**Key Benefits of Generation-Step Separation:**
-- **Selective loading**: Load only needed generation steps (7x memory reduction)
-- **Parallel experiments**: Run probes on different generation steps simultaneously 
-- **Flexible analysis**: Compare early vs late token generation, study generation dynamics
 
 **Detailed Data Specification (CORRECTED):**
 
@@ -101,12 +61,13 @@ trajectory_data_<suite>.h5
 **Hidden States (Layer Activations During Generation):**
 - **What**: Transformer layer activations captured during each of the 7 token generation steps
 - **When**: During VLA model's `generate()` process, after each layer processes the current generation step
-- **Shape per timestep**: `[7_generation_steps, num_layers, hidden_dim]`
+- **Shape per generation step file**: Contains 25 layer datasets (layer_00 through layer_24)
 - **Storage**: Separate files per generation step:
-  - `generation_step_0.h5`: `[N_samples, num_layers, hidden_dim]` - Activations when generating 1st action token
-  - `generation_step_1.h5`: `[N_samples, num_layers, hidden_dim]` - Activations when generating 2nd action token
-  - ... up to `generation_step_6.h5`
-- **Key requirement**: MUST be consistent size across all timesteps (same num_layers, same hidden_dim)
+  - `generation_step_0.h5`: Contains datasets `layer_00` through `layer_24`, each with shape `[N_samples, hidden_dim]`
+  - `generation_step_1.h5`: Same structure for 2nd action token generation
+  - ... up to `generation_step_6.h5` for 7th action token
+- **Data access**: Load specific layer from specific generation step: `file['layer_05']` gives `[N_samples, hidden_dim]`
+- **Key requirement**: MUST be consistent hidden_dim across all layers and generation steps
 
 **Vision Features (Encoder Outputs):**
 - **What**: Raw patch features from vision encoder backbone (DINOv2/CLIP/SigLIP)
@@ -122,19 +83,18 @@ trajectory_data_<suite>.h5
 **Parallel Processing Structure:**
 ```
 /temp_trajectory_processing/
-├── gpu_process_0/     # Each process handles 8 layers + data chunk
-│   ├── layers_00_07_chunk.h5  
-│   ├── actions_chunk.h5
-│   └── episodes_chunk.json
+├── gpu_process_0/     # Each process handles data chunks
+│   ├── generation_step_0_chunk.h5   # Contains layer datasets for gen step 0
+│   ├── generation_step_1_chunk.h5   # Contains layer datasets for gen step 1
+│   ├── ...
+│   ├── actions_chunk.h5             # Action data chunk
+│   ├── vision_features_chunk.h5     # Vision features chunk
+│   ├── episodes_chunk.json          # Episode metadata
+│   └── chunk_manifest.json          # Process metadata
 ├── gpu_process_1/
-│   └── layers_08_15_chunk.h5
-└── combine_manifest.json
+│   └── [similar structure]
+└── [final combination creates optimized format]
 ```
-
-**HDF5 Optimizations:**
-- **Compression**: `gzip` level 6 (good ratio/speed tradeoff) or `lzf` (faster)
-- **Chunking**: Optimize for sequential read patterns (~10MB chunks)
-- **Shuffle filter**: Improve compression on floating-point data
 
 **Expected Performance:**
 - **32x I/O reduction** for single-layer probes (22GB vs 716GB)
@@ -142,8 +102,8 @@ trajectory_data_<suite>.h5
 - **Parallel probing**: Multiple layer experiments simultaneously
 
 ### Production Dataset Location
-- Current: `/work/hdd/bfbo/xzhang42/trajectory_data_libero_90_robust.h5` (716GB, slow)
-- Target: `/work/hdd/bfbo/xzhang42/optimized_trajectory_data/` (multi-file, fast)
+- Path: `/work/nvme/bfbo/xzhang42/data/pilot_test/optimized_trajectory_data/` (multi-file, fast)
+- Dataset stats: 273 samples, 16 episodes, 25 layers (0-24), 7 generation steps (0-6)
 
 ## Key Components
 
@@ -167,23 +127,6 @@ trajectory_data_<suite>.h5
   - Additional data collection and evaluation scripts (production-ready)
 
 ## Development Commands
-
-### Environment Setup
-```bash
-# Create conda environment
-conda create -n inspire python=3.10
-conda activate inspire
-
-# Install dependencies
-cd LIBERO && pip install -r requirements.txt && pip install -e . && cd ..
-cd vq_bet_official && pip install -r requirements.txt && pip install -e . && cd ..
-pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cu118
-pip install -r requirements-min.txt
-
-# Optional: Flash Attention for better performance
-pip install packaging ninja
-pip install "flash-attn==2.5.5" --no-build-isolation
-```
 
 ### Linear Probing Commands (CURRENT FOCUS)
 ```bash

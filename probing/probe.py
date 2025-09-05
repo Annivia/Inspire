@@ -25,7 +25,7 @@ def main():
     
     # Data and experiment configuration
     parser.add_argument('--data-path', required=True, 
-                       help='Path to trajectory data HDF5 file')
+                       help='Path to optimized trajectory data directory')
     parser.add_argument('--experiment', type=int, required=True, choices=[1, 2, 3, 4],
                        help='Experiment number (1: hidden->actions, 2: vision->actions, 3: hidden->concepts, 4: vision->concepts)')
     parser.add_argument('--output-dir', default='./results',
@@ -90,8 +90,11 @@ def main():
     print(f"[DEBUG] Saved configuration to: {config_file}")
     
     # Verify data path exists
-    if not Path(args.data_path).exists():
-        raise FileNotFoundError(f"Data file not found: {args.data_path}")
+    data_path = Path(args.data_path)
+    if not data_path.exists():
+        raise FileNotFoundError(f"Data directory not found: {args.data_path}")
+    if not data_path.is_dir():
+        raise NotADirectoryError(f"Data path must be a directory: {args.data_path}")
     
     # Run the specified experiment
     start_time = time.time()
