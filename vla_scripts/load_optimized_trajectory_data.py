@@ -533,6 +533,11 @@ def get_actions_data_flat(dataset: Dict,
     """
     actions = dataset['actions']
     
+    # Fix: VQ-BET returns action horizons with shape (N, horizon, action_dim)
+    # We only need the current action (first horizon element)
+    if len(actions.shape) == 3 and actions.shape[1] > 1:
+        actions = actions[:, 0, :]  # Take first horizon element: (N, horizon, action_dim) -> (N, action_dim)
+    
     if include_metadata:
         # Create metadata for each sample  
         metadata_list = []
