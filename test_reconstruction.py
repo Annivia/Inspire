@@ -7,6 +7,7 @@ import os
 os.environ["MUJOCO_GL"] = "egl" 
 os.environ["MUJOCO_EGL_DEVICE_ID"] = "0"
 
+from experiments.robot.robot_utils import normalize_gripper_action, invert_gripper_action
 from vla_scripts.reconstruct_trajectory_data import load_episode_metadata, reconstruct_trajectory_episode, get_reconstruction_paths
 
 def test_metadata_loading():
@@ -133,6 +134,40 @@ def test_auto_paths():
         print(f"ERROR in auto path derivation: {e}")
         return False
 
+def test_action_processing():
+    """Test that action processing matches parallel_libero_evaluator.py"""
+    print("\n=== TESTING ACTION PROCESSING ===")
+    
+    try:
+        import numpy as np
+        
+        # Test case: typical VLA output (unnormalized)
+        test_action = np.array([0.2, -0.1, 0.05, 0.15, -0.08, 0.03, 0.7])  # Last is gripper [0,1]
+        print(f"Original VLA action: {test_action}")
+        
+        # Apply same processing as reconstruction script
+        processed_action = test_action.copy()
+        processed_action = normalize_gripper_action(processed_action, binarize=True)
+        processed_action = invert_gripper_action(processed_action)
+        
+        print(f"Processed action: {processed_action}")
+        print(f"Position/rotation: {processed_action[:6]}")  # Should be unchanged
+        print(f"Gripper: {processed_action[6]}")  # Should be -1 or +1
+        
+        # Verify gripper is properly binarized and inverted
+        if processed_action[6] in [-1.0, 1.0]:
+            print("✅ Gripper action correctly processed")
+            return True
+        else:
+            print(f"❌ Gripper action not properly binarized: {processed_action[6]}")
+            return False
+            
+    except Exception as e:
+        print(f"ERROR in action processing test: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def test_rendering_toggle():
     """Test rendering enable/disable functionality"""
     print("\n=== TESTING RENDERING TOGGLE ===")
@@ -222,13 +257,19 @@ def main():
         print("FAILED: Auto path derivation test failed")
         return
     
-    # Test 4: Rendering toggle
+    # Test 4: Action processing
+    action_success = test_action_processing()
+    if not action_success:
+        print("FAILED: Action processing test failed")
+        return
+    
+    # Test 5: Rendering toggle
     render_success = test_rendering_toggle()
     if not render_success:
         print("FAILED: Rendering toggle test failed")
         return
     
-    # Test 5: Single episode reconstruction with HDF5
+    # Test 6: Single episode reconstruction with HDF5
     recon_success = test_single_episode_reconstruction()
     if not recon_success:
         print("FAILED: Single episode reconstruction test failed")
@@ -238,6 +279,7 @@ def main():
     print("✅ ALL TESTS PASSED!")
     print("Updated reconstruction script is ready for probes 3 and 4")
     print("\nKey features tested:")
+    print("• ✅ Action processing (matches parallel_libero_evaluator.py)")
     print("• ✅ Rendering toggle for scalability")
     print("• ✅ HDF5 tensor storage (efficient)")
     print("• ✅ Auto-derived paths in mother folder")

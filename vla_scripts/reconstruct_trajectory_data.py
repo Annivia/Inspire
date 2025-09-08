@@ -28,6 +28,7 @@ sys.path.append('/u/xzhang42/Inspire/vq_bet_official')
 
 from libero.libero import benchmark
 from experiments.robot.libero.libero_utils import get_libero_env, get_libero_image
+from experiments.robot.robot_utils import normalize_gripper_action, invert_gripper_action
 import threading
 import time
 from collections import defaultdict
@@ -373,10 +374,21 @@ def reconstruct_trajectory_episode(
         
         # Fix: VQ-BET returns action horizons with shape (N, horizon, action_dim)
         # We only need the current action (first horizon element)
-        if len(stored_actions.shape) == 3 and stored_actions.shape[1] > 1:
-            print(f"[debug-recon] Action shape before horizon fix: {stored_actions.shape}")
-            stored_actions = stored_actions[:, 0, :]  # Take first horizon element: (N, horizon, action_dim) -> (N, action_dim)
-            print(f"[debug-recon] Action shape after horizon fix: {stored_actions.shape}")
+
+        ## Polina: This was premature filtering
+        # if len(stored_actions.shape) == 3 and stored_actions.shape[1] > 1:
+        #     print(f"[debug-recon] Action shape before horizon fix: {stored_actions.shape}")
+        #     stored_actions = stored_actions[:, 0, :]  # Take first horizon element: (N, horizon, action_dim) -> (N, action_dim)
+        #     print(f"[debug-recon] Action shape after horizon fix: {stored_actions.shape}")
+
+        """For timestep > 0:
+      - horizon_actions = stored_actions[timestep - 1]  # shape (horizon, 7)
+      - For each sub_action in horizon_actions:
+        - sub_action = normalize_gripper_action(sub_action, binarize=True)
+        - sub_action = invert_gripper_action(sub_action)
+        - obs, reward, done, info = env.step(sub_action.tolist())
+        - Optionally save image/state for each substep (or just the last substep if you want the same frame count as before)
+        """
         
         # Verify we have the right number of actions
         print(f"[debug-recon] Final actions shape: {stored_actions.shape}")
@@ -441,11 +453,44 @@ def reconstruct_trajectory_episode(
                 # Use the ACTUAL stored action from HDF5 file!
                 action_idx = timestep - 1  # Actions are offset by 1 from timesteps
                 if action_idx < len(stored_actions):
-                    action = stored_actions[action_idx]
-                    print(f"[debug-recon] Timestep {timestep}: action_idx={action_idx}, action={action}")
-                    obs, reward, done, info = env.step(action.tolist())
-                    if timestep <= 3:  # Debug first few steps
-                        print(f"[debug-recon] Step result: reward={reward:.3f}, done={done}")
+                    # Action horizon handling: All actions should be executed
+                    horizon_actions = stored_actions[action_idx]  # shape (horizon, 7)
+                    
+                    if timestep == 1:
+                        if hasattr(env, 'action_space') and hasattr(env.action_space, 'low'):
+                            print(f"[SCALE-DEBUG] LIBERO action space: low={env.action_space.low}, high={env.action_space.high}")
+                        print(f"[SCALE-DEBUG] Horizon actions shape: {horizon_actions.shape}")
+                        print(f"[SCALE-DEBUG] First horizon action range: {horizon_actions[0][:6] if len(horizon_actions.shape) > 1 else horizon_actions[:6]}")
+                    
+                    # Execute each action in the horizon
+                    if len(horizon_actions.shape) == 2:  # (horizon, 7)
+                        for sub_action in horizon_actions:
+                            # Step 1: normalize_gripper_action (same as line 388-390 in parallel_libero_evaluator.py)
+                            action = normalize_gripper_action(sub_action.copy(), binarize=True)
+                            
+                            # Step 2: invert_gripper_action for prismatic (same as line 395-397 in parallel_libero_evaluator.py) 
+                            action = invert_gripper_action(action)
+                            
+                            if timestep <= 3:  # Only debug first few steps
+                                print(f"[SCALE-DEBUG] Sub-action before processing: {sub_action[:6]}")
+                                print(f"[SCALE-DEBUG] Sub-action after processing: {action[:6]}")
+                            
+                            obs, reward, done, info = env.step(action.tolist())
+                            
+                            if timestep <= 3:  # Debug first few steps
+                                print(f"[debug-recon] Sub-step result: reward={reward:.3f}, done={done}")
+                    else:  # Single action (horizon=1)
+                        action = normalize_gripper_action(horizon_actions.copy(), binarize=True)
+                        action = invert_gripper_action(action)
+                        
+                        if timestep <= 3:  # Only debug first few steps
+                            print(f"[SCALE-DEBUG] Single action before processing: {horizon_actions[:6]}")
+                            print(f"[SCALE-DEBUG] Single action after processing: {action[:6]}")
+                        
+                        obs, reward, done, info = env.step(action.tolist())
+                        
+                        if timestep <= 3:  # Debug first few steps
+                            print(f"[debug-recon] Step result: reward={reward:.3f}, done={done}")
                 else:
                     print(f"[debug-recon] ERROR: action_idx {action_idx} >= len(stored_actions) {len(stored_actions)}")
                     break
