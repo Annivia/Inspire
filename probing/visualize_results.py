@@ -415,6 +415,232 @@ def create_summary_heatmap(results: Dict, output_path: Path, debug: bool = False
     return output_path
 
 
+def visualize_experiment_2_results(
+    results: Dict, 
+    output_dir: str,
+    debug: bool = False
+) -> List[str]:
+    """
+    Create visualizations for Experiment 2: [Vision encoder outputs] -> actions.
+    
+    Args:
+        results: Experiment results dictionary  
+        output_dir: Directory to save plots
+        debug: Enable debug output
+        
+    Returns:
+        List of generated plot file paths
+    """
+    if debug:
+        print(f"[DEBUG] Creating visualizations for Experiment 2")
+    
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    generated_plots = []
+    
+    # Extract probe results
+    probe_results = results.get('results', {})
+    
+    if 'error' in probe_results:
+        if debug:
+            print(f"[DEBUG] Cannot visualize due to error: {probe_results['error']}")
+        return []
+    
+    # Plot 1: Raw patches linear separability by action dimension
+    if 'raw_patches' in probe_results:
+        plot1_path = create_vision_separability_plot(
+            probe_results['raw_patches'], 'Raw Vision Patches',
+            output_path / "experiment_2_raw_patches_separability.png", debug
+        )
+        generated_plots.append(str(plot1_path))
+    
+    # Plot 2: VLM embeddings linear separability by action dimension  
+    if 'vlm_embeddings' in probe_results:
+        plot2_path = create_vision_separability_plot(
+            probe_results['vlm_embeddings'], 'VLM Visual Embeddings',
+            output_path / "experiment_2_vlm_embeddings_separability.png", debug
+        )
+        generated_plots.append(str(plot2_path))
+    
+    # Plot 3: Comparison between raw patches and VLM embeddings
+    if 'raw_patches' in probe_results and 'vlm_embeddings' in probe_results:
+        plot3_path = create_vision_comparison_plot(
+            probe_results, output_path / "experiment_2_vision_comparison.png", debug
+        )
+        generated_plots.append(str(plot3_path))
+    
+    if debug:
+        print(f"[DEBUG] Generated {len(generated_plots)} plots:")
+        for plot in generated_plots:
+            print(f"[DEBUG] - {plot}")
+    
+    return generated_plots
+
+
+def create_vision_separability_plot(
+    vision_results: Dict, vision_type: str, output_path: Path, debug: bool = False
+) -> Path:
+    """Create linear separability plot for vision encoder results by action dimension."""
+    
+    if debug:
+        print(f"[DEBUG] Creating {vision_type} separability plot")
+    
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    # Extract per-action-dimension R2 scores
+    conditions = ['normal', 'randomized', 'noise']
+    condition_labels = ['Normal (Original)', 'Randomized (Broken Correspondence)', 'Noise (Gaussian)']
+    colors = ['#2E86AB', '#A23B72', '#F18F01']
+    
+    # Find all action dimensions
+    normal_results = vision_results.get('normal', {})
+    dimension_keys = [k for k in normal_results.keys() if k.startswith('r2_test_dim_')]
+    num_dims = len(dimension_keys)
+    
+    if num_dims == 0:
+        # Fallback to overall R2 if no per-dimension data
+        if debug:
+            print(f"[DEBUG] No per-dimension data found, using overall R2")
+        overall_r2 = [vision_results.get(cond, {}).get('r2_test', 0) for cond in conditions]
+        bars = ax.bar(condition_labels, overall_r2, color=colors, alpha=0.8, edgecolor='black', linewidth=1)
+        ax.set_ylabel('R² Score', fontsize=12)
+        ax.set_title(f'{vision_type} → Actions Linear Separability\n(Higher R² = More Linearly Separable)', 
+                    fontsize=14, fontweight='bold')
+        
+        # Add value labels
+        for bar, score in zip(bars, overall_r2):
+            height = bar.get_height()
+            ax.annotate(f'{score:.3f}',
+                       xy=(bar.get_x() + bar.get_width() / 2, height),
+                       xytext=(0, 3),  # 3 points vertical offset
+                       textcoords="offset points",
+                       ha='center', va='bottom', fontsize=10)
+    else:
+        # Create grouped bar chart for each action dimension
+        action_dims = [f'Action {i}' for i in range(num_dims)]
+        x = np.arange(num_dims)
+        width = 0.25
+        
+        for i, (condition, label, color) in enumerate(zip(conditions, condition_labels, colors)):
+            if condition in vision_results:
+                dim_scores = []
+                for dim_idx in range(num_dims):
+                    dim_key = f'r2_test_dim_{dim_idx}'
+                    score = vision_results[condition].get(dim_key, 0)
+                    dim_scores.append(score)
+                
+                bars = ax.bar(x + i*width, dim_scores, width, label=label, 
+                             color=color, alpha=0.8, edgecolor='black', linewidth=0.5)
+                
+                # Add value labels (only for normal condition to avoid clutter)
+                if condition == 'normal':
+                    for bar, score in zip(bars, dim_scores):
+                        height = bar.get_height()
+                        if height > 0:
+                            ax.annotate(f'{score:.2f}',
+                                       xy=(bar.get_x() + bar.get_width() / 2, height),
+                                       xytext=(0, 3),
+                                       textcoords="offset points", 
+                                       ha='center', va='bottom', fontsize=9)
+        
+        ax.set_xlabel('Action Dimensions', fontsize=12)
+        ax.set_ylabel('R² Score', fontsize=12)
+        ax.set_title(f'{vision_type} → Actions Linear Separability by Action Dimension\n(Higher R² = More Linearly Separable)', 
+                    fontsize=14, fontweight='bold')
+        ax.set_xticks(x + width)
+        ax.set_xticklabels(action_dims)
+        ax.legend(fontsize=11)
+    
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    if debug:
+        print(f"[DEBUG] Saved {vision_type} separability plot to: {output_path}")
+    
+    return output_path
+
+
+def create_vision_comparison_plot(
+    results: Dict, output_path: Path, debug: bool = False
+) -> Path:
+    """Create comparison plot between raw patches and VLM embeddings."""
+    
+    if debug:
+        print(f"[DEBUG] Creating vision comparison plot")
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    
+    # Extract overall R2 scores for both vision types
+    raw_patches_results = results.get('raw_patches', {})
+    vlm_embeddings_results = results.get('vlm_embeddings', {})
+    
+    conditions = ['normal', 'randomized', 'noise']
+    condition_labels = ['Normal', 'Randomized', 'Noise']
+    colors = ['#2E86AB', '#A23B72', '#F18F01']
+    
+    # Overall R2 comparison
+    raw_r2 = [raw_patches_results.get(cond, {}).get('r2_test', 0) for cond in conditions]
+    vlm_r2 = [vlm_embeddings_results.get(cond, {}).get('r2_test', 0) for cond in conditions]
+    
+    x = np.arange(len(condition_labels))
+    width = 0.35
+    
+    bars1 = ax1.bar(x - width/2, raw_r2, width, label='Raw Patches', alpha=0.8, color='#2E86AB')
+    bars2 = ax1.bar(x + width/2, vlm_r2, width, label='VLM Embeddings', alpha=0.8, color='#F18F01')
+    
+    ax1.set_xlabel('Baseline Conditions', fontsize=12)
+    ax1.set_ylabel('R² Score', fontsize=12)
+    ax1.set_title('Raw Patches vs VLM Embeddings\nLinear Separability Comparison', fontsize=13)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(condition_labels)
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Add value labels
+    for bars in [bars1, bars2]:
+        for bar in bars:
+            height = bar.get_height()
+            ax1.annotate(f'{height:.3f}',
+                       xy=(bar.get_x() + bar.get_width() / 2, height),
+                       xytext=(0, 3),
+                       textcoords="offset points",
+                       ha='center', va='bottom', fontsize=9)
+    
+    # Linear separability analysis (Normal vs Random)
+    raw_normal = raw_r2[0]
+    raw_random = raw_r2[1] 
+    vlm_normal = vlm_r2[0]
+    vlm_random = vlm_r2[1]
+    
+    ax2.scatter([raw_normal], [raw_random], s=100, alpha=0.8, c='#2E86AB', label='Raw Patches')
+    ax2.scatter([vlm_normal], [vlm_random], s=100, alpha=0.8, c='#F18F01', label='VLM Embeddings')
+    ax2.plot([0, 1], [0, 1], 'k--', alpha=0.5, label='Perfect Correlation')
+    ax2.set_xlabel('Normal R² (Original Data)', fontsize=12)
+    ax2.set_ylabel('Random R² (Shuffled Pairs)', fontsize=12)
+    ax2.set_title('Normal vs Random Performance\n(Points below diagonal = meaningful signal)', fontsize=13)
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    # Add labels
+    ax2.annotate('Raw Patches', (raw_normal, raw_random), xytext=(5, 5), 
+                textcoords='offset points', fontsize=10)
+    ax2.annotate('VLM Embeddings', (vlm_normal, vlm_random), xytext=(5, 5),
+                textcoords='offset points', fontsize=10)
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    if debug:
+        print(f"[DEBUG] Saved vision comparison plot to: {output_path}")
+    
+    return output_path
+
+
 def main():
     parser = argparse.ArgumentParser(description='Visualize linear probing experiment results')
     parser.add_argument('results_file', help='Path to experiment results JSON file')
@@ -431,6 +657,11 @@ def main():
     if args.experiment == 1:
         plots = visualize_experiment_1_results(results, args.output_dir, args.debug)
         print(f"[INFO] Generated {len(plots)} plots for Experiment 1")
+        for plot in plots:
+            print(f"[INFO] - {plot}")
+    elif args.experiment == 2:
+        plots = visualize_experiment_2_results(results, args.output_dir, args.debug)
+        print(f"[INFO] Generated {len(plots)} plots for Experiment 2")
         for plot in plots:
             print(f"[INFO] - {plot}")
     else:

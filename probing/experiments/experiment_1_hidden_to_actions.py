@@ -77,7 +77,11 @@ def run_experiment_1(
         dataset = load_trajectory_dataset(
             data_path=data_path,
             layers=layers,
-            successful_only=successful_only
+            successful_only=successful_only,
+            load_hidden_states=True,  # Need hidden states
+            load_actions=True,        # Need actions as targets
+            load_vision_features=False,  # Skip vision features (not needed)
+            load_vlm_embeddings=False    # Skip VLM embeddings (not needed)
         )
     except Exception as e:
         if debug:

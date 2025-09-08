@@ -18,6 +18,7 @@ import time
 sys.path.append('/u/xzhang42/Inspire')
 
 from probing.experiments.experiment_1_hidden_to_actions import run_experiment_1
+from probing.experiments.experiment_2_vision_to_actions import run_experiment_2
 
 
 def main():
@@ -46,6 +47,10 @@ def main():
                        help='Fraction of data to use for testing (default: 0.2)')
     parser.add_argument('--random-seed', type=int, default=42,
                        help='Random seed for reproducibility')
+    
+    # Experiment 2 specific options
+    parser.add_argument('--vision-type', choices=["raw", "vlm", "both"], default="both",
+                       help='Which vision features to probe for experiment 2 (default: both)')
     
     # Debug options
     parser.add_argument('--debug', action='store_true',
@@ -115,8 +120,17 @@ def main():
             )
             
         elif args.experiment == 2:
-            print(f"[DEBUG] Experiment 2 not yet implemented")
-            raise NotImplementedError("Experiment 2: [Vision encoder outputs] -> actions not yet implemented")
+            print(f"[DEBUG] Running Experiment 2: [Vision encoder outputs] -> actions")
+            results = run_experiment_2(
+                data_path=args.data_path,
+                output_dir=args.output_dir,
+                vision_type=args.vision_type,
+                successful_only=args.successful_only,
+                max_episodes=args.max_episodes,
+                test_size=args.test_size,
+                random_seed=args.random_seed,
+                debug=args.debug
+            )
             
         elif args.experiment == 3:
             print(f"[DEBUG] Experiment 3 not yet implemented")

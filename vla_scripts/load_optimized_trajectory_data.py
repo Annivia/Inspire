@@ -433,12 +433,16 @@ def load_trajectory_dataset(data_path: Union[str, Path],
                            episodes: Optional[List[int]] = None,
                            generation_steps: Optional[List[int]] = None,
                            successful_only: bool = True,
+                           load_hidden_states: bool = True,
+                           load_actions: bool = True,
+                           load_vision_features: bool = True,
+                           load_vlm_embeddings: bool = True,
                            **kwargs) -> Dict:
     """
     Backwards-compatible interface for loading optimized trajectory data.
     
     This function provides the same interface as the original loader but
-    with dramatically improved performance for single-layer access.
+    with dramatically improved performance for single-layer access and selective loading.
     
     Args:
         data_path: Path to optimized trajectory data directory
@@ -447,12 +451,17 @@ def load_trajectory_dataset(data_path: Union[str, Path],
         episodes: Episode IDs to include (None for all)
         generation_steps: Generation steps to load (None for all available, [0] for default)
         successful_only: Only load successful episodes
+        load_hidden_states: Whether to load hidden states (default: True)
+        load_actions: Whether to load actions (default: True)
+        load_vision_features: Whether to load vision features (default: True)
+        load_vlm_embeddings: Whether to load VLM embeddings (default: True)
         
     Returns:
         Dictionary with same structure as original loader:
-        - 'hidden_states': Dict[layer_idx] -> np.ndarray
-        - 'actions': np.ndarray  
-        - 'vision_features': np.ndarray
+        - 'hidden_states': Dict[layer_idx] -> np.ndarray (if load_hidden_states=True)
+        - 'actions': np.ndarray (if load_actions=True)
+        - 'vision_features': np.ndarray (if load_vision_features=True)
+        - 'vlm_embeddings': np.ndarray (if load_vlm_embeddings=True)
         - 'metadata': List of episode metadata dicts
         - 'summary': Dataset summary
     """
@@ -462,44 +471,54 @@ def load_trajectory_dataset(data_path: Union[str, Path],
     filtered_episodes = loader._filter_episodes(tasks, episodes, successful_only)
     metadata = filtered_episodes.to_dict('records')
     
-    # Load actions, vision features, and VLM embeddings
-    actions_array, _ = loader.load_actions_data(tasks, episodes, successful_only)
-    vision_array, _ = loader.load_vision_features_data(tasks, episodes, successful_only)
-    vlm_embeddings_array, _ = loader.load_vlm_embeddings_data(tasks, episodes, successful_only)
+    # Selective loading based on parameters
+    actions_array = np.array([])
+    vision_array = np.array([])
+    vlm_embeddings_array = np.array([])
+    
+    if load_actions:
+        actions_array, _ = loader.load_actions_data(tasks, episodes, successful_only)
+    
+    if load_vision_features:
+        vision_array, _ = loader.load_vision_features_data(tasks, episodes, successful_only)
+    
+    if load_vlm_embeddings:
+        vlm_embeddings_array, _ = loader.load_vlm_embeddings_data(tasks, episodes, successful_only)
     
     # Load hidden states - NEW: Support both generation step and legacy formats
     hidden_states = {}
     
-    if 'generation_steps' in loader.summary:
-        # NEW FORMAT: Load by generation step
-        if generation_steps is None:
-            generation_steps = loader.summary['generation_steps']
-        
-        if layers is None:
-            layers = loader.summary['layer_indices']
-        
-        # Load data by layer (existing method already handles generation steps correctly)
-        for layer_idx in layers:
-            if layer_idx in loader.summary['layer_indices']:
-                layer_data, _ = loader.load_layer_data(layer_idx, tasks, episodes, successful_only)
-                hidden_states[layer_idx] = layer_data
-            else:
-                print(f"WARNING: Layer {layer_idx} not available in dataset")
-        
-    else:
-        # LEGACY FORMAT: Load by layer
-        if generation_steps is not None and generation_steps != [0]:
-            print(f"WARNING: Legacy format only supports generation_step_0. Ignoring: {generation_steps}")
-        
-        if layers is None:
-            layers = loader.summary['layer_indices']
-        
-        for layer_idx in layers:
-            if layer_idx in loader.summary['layer_indices']:
-                layer_data, _ = loader.load_layer_data(layer_idx, tasks, episodes, successful_only)
-                hidden_states[layer_idx] = layer_data
-            else:
-                print(f"WARNING: Layer {layer_idx} not available in dataset")
+    if load_hidden_states:
+        if 'generation_steps' in loader.summary:
+            # NEW FORMAT: Load by generation step
+            if generation_steps is None:
+                generation_steps = loader.summary['generation_steps']
+            
+            if layers is None:
+                layers = loader.summary['layer_indices']
+            
+            # Load data by layer (existing method already handles generation steps correctly)
+            for layer_idx in layers:
+                if layer_idx in loader.summary['layer_indices']:
+                    layer_data, _ = loader.load_layer_data(layer_idx, tasks, episodes, successful_only)
+                    hidden_states[layer_idx] = layer_data
+                else:
+                    print(f"WARNING: Layer {layer_idx} not available in dataset")
+            
+        else:
+            # LEGACY FORMAT: Load by layer
+            if generation_steps is not None and generation_steps != [0]:
+                print(f"WARNING: Legacy format only supports generation_step_0. Ignoring: {generation_steps}")
+            
+            if layers is None:
+                layers = loader.summary['layer_indices']
+            
+            for layer_idx in layers:
+                if layer_idx in loader.summary['layer_indices']:
+                    layer_data, _ = loader.load_layer_data(layer_idx, tasks, episodes, successful_only)
+                    hidden_states[layer_idx] = layer_data
+                else:
+                    print(f"WARNING: Layer {layer_idx} not available in dataset")
     
     # Create summary
     summary = {
@@ -515,10 +534,26 @@ def load_trajectory_dataset(data_path: Union[str, Path],
     print(f"\nOptimized Dataset Summary:")
     print(f"  Loaded episodes: {len(filtered_episodes)}")
     print(f"  Successful episodes: {summary['successful_episodes']}")
-    print(f"  Layers loaded: {len(hidden_states)}")
-    print(f"  Actions shape: {actions_array.shape}")
-    print(f"  Vision features shape: {vision_array.shape}")
-    print(f"  VLM embeddings shape: {vlm_embeddings_array.shape}")
+    
+    if load_hidden_states:
+        print(f"  Layers loaded: {len(hidden_states)}")
+    else:
+        print(f"  Hidden states: Skipped")
+        
+    if load_actions:
+        print(f"  Actions shape: {actions_array.shape}")
+    else:
+        print(f"  Actions: Skipped")
+        
+    if load_vision_features:
+        print(f"  Vision features shape: {vision_array.shape}")
+    else:
+        print(f"  Vision features: Skipped")
+        
+    if load_vlm_embeddings:
+        print(f"  VLM embeddings shape: {vlm_embeddings_array.shape}")
+    else:
+        print(f"  VLM embeddings: Skipped")
     
     return {
         'hidden_states': hidden_states,

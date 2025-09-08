@@ -1,109 +1,205 @@
 #!/bin/bash
-
+#
 # probe2.sh
-# Run Experiment 2: [Vision encoder outputs] -> actions
-# Linear regression probes for vision encoder patch features
+#
+# Experiment 2: [Vision encoder outputs] -> actions
+# Train linear regression probes for both:
+# - Raw patch features from vision backbone (DINOv2/CLIP/SigLIP etc.)
+# - VLM-transformed visual embeddings (after projector)
+#
+# Automatically runs all three baselines for each vision type:
+# 1. Normal: Original data
+# 2. Randomized pairs: randomly shuffle vision features and action sequences
+# 3. Noise baseline: [Vision features] -> gaussian noise with same dim as actions
+#
+# Usage: bash probe2.sh
 
-set -e  # Exit on any error
-
-# Configuration
+# Hardcoded configuration for Experiment 2
 DATA_PATH="/work/nvme/bfbo/xzhang42/data/pilot_test/optimized_trajectory_data"
-OUTPUT_DIR="results/experiment_2"
-DEBUG=true
+EXPERIMENT=2
+OUTPUT_DIR="./results/experiment_2"
+VISION_TYPE="both"  # "raw", "vlm", or "both"
+TEST_SIZE=0.2
+RANDOM_SEED=42
+DEBUG="--debug"
 
-# Activate environment if needed
-# source activate probe
+# Color codes for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
-echo "============================================="
-echo "Experiment 2: [Vision encoder outputs] -> actions"
-echo "============================================="
+print_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
-echo "Configuration:"
-echo "  Data path: $DATA_PATH"
-echo "  Output dir: $OUTPUT_DIR" 
-echo "  Debug: $DEBUG"
+print_info "=== Experiment 2: [Vision encoder outputs] -> actions ==="
+print_info "Linear regression probes testing what action information is linearly accessible"
+print_info "in vision encoder representations (both raw patches and VLM embeddings)."
+print_info ""
+print_info "This experiment automatically runs THREE baselines for each vision type:"
+print_info "  1. Normal: Original vision features -> actions"
+print_info "  2. Randomized: Shuffled vision features -> actions (tests chance performance)"
+print_info "  3. Noise: Vision features -> Gaussian noise (tests overfitting)"
+print_info ""
+print_info "Vision types being tested:"
+if [[ "$VISION_TYPE" == "both" ]]; then
+    print_info "  • Raw patch features from vision backbone"
+    print_info "  • VLM-transformed visual embeddings"
+elif [[ "$VISION_TYPE" == "raw" ]]; then
+    print_info "  • Raw patch features from vision backbone"
+elif [[ "$VISION_TYPE" == "vlm" ]]; then
+    print_info "  • VLM-transformed visual embeddings"
+fi
+print_info ""
+print_info "Configuration:"
+print_info "  Data: $DATA_PATH"
+print_info "  Output: $OUTPUT_DIR"
+print_info "  Vision type: $VISION_TYPE"
+print_info "  Test size: $TEST_SIZE"
+print_info "  Random seed: $RANDOM_SEED"
+print_info "  Debug: enabled"
+print_info ""
+
+# Ensure we're in the correct directory
+SCRIPT_DIR="/u/xzhang42/Inspire/probing"
+cd "$SCRIPT_DIR" || { print_error "Could not change to $SCRIPT_DIR"; exit 1; }
+
+# Verify required files exist
+if [[ ! -f "probe.py" ]]; then
+    print_error "probe.py not found in $SCRIPT_DIR"
+    exit 1
+fi
+
+if [[ ! -d "$DATA_PATH" ]]; then
+    print_error "Data directory not found: $DATA_PATH"
+    exit 1
+fi
 
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
 
-# Run Experiment 2
-echo ""
-echo "Running Experiment 2..."
-python3 experiments/experiment_2_vision_to_actions.py \
-    "$DATA_PATH" \
-    "$OUTPUT_DIR" \
-    --successful-only \
-    --test-size 0.2 \
-    --random-seed 42 \
-    $([ "$DEBUG" = true ] && echo "--debug")
+# Build and run command - this will automatically run all 3 baselines for each vision type
+CMD="python probe.py"
+CMD="$CMD --data-path \"$DATA_PATH\""
+CMD="$CMD --experiment $EXPERIMENT"
+CMD="$CMD --output-dir \"$OUTPUT_DIR\""
+CMD="$CMD --vision-type $VISION_TYPE"
+CMD="$CMD --test-size $TEST_SIZE"
+CMD="$CMD --random-seed $RANDOM_SEED"
+CMD="$CMD --successful-only"
+CMD="$CMD $DEBUG"
 
-echo ""
-echo "============================================="
-echo "Experiment 2 completed!"
-echo "============================================="
-echo ""
-echo "Results saved to: $OUTPUT_DIR"
+print_info "Running Experiment 2 with all baselines for vision type: $VISION_TYPE..."
+print_info "Command: $CMD"
+print_info ""
 
-# Display key results if available
-if [ -f "$OUTPUT_DIR/experiment_2_complete_results.json" ]; then
-    echo ""
-    echo "Key Results:"
-    python3 -c "
+# Execute experiment (this runs Normal, Randomized, and Noise baselines automatically)
+eval $CMD
+
+PROBE_EXIT_CODE=$?
+
+if [[ $PROBE_EXIT_CODE -eq 0 ]]; then
+    print_success "Experiment 2 completed successfully!"
+    print_info ""
+    if [[ "$VISION_TYPE" == "both" ]]; then
+        print_info "All three baselines have been evaluated for both vision types:"
+        print_info "  ✓ Raw patch features (Normal, Randomized, Noise baselines)"
+        print_info "  ✓ VLM visual embeddings (Normal, Randomized, Noise baselines)"
+    else
+        print_info "All three baselines have been evaluated for $VISION_TYPE vision features:"
+        print_info "  ✓ Normal baseline (original data)"
+        print_info "  ✓ Randomized baseline (shuffled pairs)"  
+        print_info "  ✓ Noise baseline (Gaussian targets)"
+    fi
+    print_info ""
+    
+    # Display key results if available
+    if [[ -f "$OUTPUT_DIR/experiment_2_complete_results.json" ]]; then
+        print_info "Key Results:"
+        python3 -c "
 import json
 with open('$OUTPUT_DIR/experiment_2_complete_results.json', 'r') as f:
     results = json.load(f)
     
-if 'experiment_summary' in results and 'error' not in results['experiment_summary']:
-    summary = results['experiment_summary']
-    print(f'  Normal R2: {summary[\"normal_r2\"]:.4f}')
-    print(f'  Random R2: {summary[\"random_r2\"]:.4f}')
-    print(f'  Noise R2: {summary[\"noise_r2\"]:.4f}')
-    print(f'  Linear separability: {summary[\"linear_separability_strength\"]:.4f}')
+if 'experiment_summary' in results:
+    for exp_name, summary in results['experiment_summary'].items():
+        if 'error' not in summary:
+            print(f'  {exp_name}:')
+            print(f'    Normal R2: {summary[\"normal_r2\"]:.4f}')
+            print(f'    Random R2: {summary[\"random_r2\"]:.4f}')
+            print(f'    Noise R2: {summary[\"noise_r2\"]:.4f}')
+            print(f'    Linear separability: {summary[\"linear_separability_strength\"]:.4f}')
+        else:
+            print(f'  {exp_name}: {summary[\"error\"]}')
 else:
-    print('  Summary not available or error occurred')
+    print('  Summary not available')
 "
-fi
-
-# Generate visualizations
-echo ""
-echo "============================================="
-echo "Generating visualizations..."
-echo "============================================="
-
-if [ -f "$OUTPUT_DIR/experiment_2_complete_results.json" ]; then
-    echo "Creating Experiment 2 visualizations..."
+    fi
     
-    # Check if Experiment 1 results exist for comparison
-    EXP1_RESULTS="results/experiment_1/experiment_1_complete_results.json"
-    if [ -f "$EXP1_RESULTS" ]; then
-        echo "Found Experiment 1 results - creating comparison plots..."
-        python3 visualize_experiment_2.py \
-            "$OUTPUT_DIR/experiment_2_complete_results.json" \
-            "$OUTPUT_DIR" \
-            --exp1-results "$EXP1_RESULTS" \
-            --dpi 300
+    # Generate visualizations
+    print_info ""
+    print_info "Generating visualizations..."
+    RESULTS_FILE="$OUTPUT_DIR/experiment_2_complete_results.json"
+    
+    if [[ -f "$RESULTS_FILE" ]]; then
+        PLOTS_DIR="$OUTPUT_DIR/plots"
+        mkdir -p "$PLOTS_DIR"
+        
+        VISUALIZE_CMD="python visualize_results.py \"$RESULTS_FILE\" --output-dir \"$PLOTS_DIR\" --experiment 2 --debug"
+        print_info "Running: $VISUALIZE_CMD"
+        print_info ""
+        
+        eval $VISUALIZE_CMD
+        VISUALIZE_EXIT_CODE=$?
+        
+        if [[ $VISUALIZE_EXIT_CODE -eq 0 ]]; then
+            print_success "Visualizations generated successfully!"
+            print_info "Plots saved to: $PLOTS_DIR/"
+            print_info ""
+            
+            # List generated plots
+            if ls "$PLOTS_DIR"/*.png 1> /dev/null 2>&1; then
+                print_info "Generated visualization plots:"
+                for plot in "$PLOTS_DIR"/*.png; do
+                    print_info "  - $(basename "$plot")"
+                done
+            fi
+        else
+            print_warning "Visualization generation failed (exit code: $VISUALIZE_EXIT_CODE)"
+        fi
     else
-        echo "Experiment 1 results not found - creating Experiment 2 plots only..."
-        python3 visualize_experiment_2.py \
-            "$OUTPUT_DIR/experiment_2_complete_results.json" \
-            "$OUTPUT_DIR" \
-            --dpi 300
+        print_warning "Results file not found: $RESULTS_FILE"
     fi
     
-    echo ""
-    echo "Visualizations saved to: $OUTPUT_DIR"
-    echo "Generated plots:"
-    echo "  - experiment_2_baseline_comparison.png"
-    echo "  - experiment_2_action_dimensions.png (if per-dimension data available)"
-    echo "  - experiment_2_separability_summary.png"
-    if [ -f "$EXP1_RESULTS" ]; then
-        echo "  - experiments_1_vs_2_comparison.png"
+    print_info ""
+    print_success "=== Experiment 2 Complete ==="
+    print_info "Results directory: $OUTPUT_DIR"
+    print_info "Visualization plots: $OUTPUT_DIR/plots/"
+    print_info ""
+    print_info "Key output files:"
+    print_info "  - experiment_2_complete_results.json (comprehensive results)"
+    if [[ "$VISION_TYPE" == "both" ]]; then
+        print_info "  - raw_patches_results.json (raw patch features results)"
+        print_info "  - vlm_embeddings_results.json (VLM embeddings results)"
+    elif [[ "$VISION_TYPE" == "raw" ]]; then
+        print_info "  - raw_patches_results.json (raw patch features results)"
+    elif [[ "$VISION_TYPE" == "vlm" ]]; then
+        print_info "  - vlm_embeddings_results.json (VLM embeddings results)"
     fi
+    print_info "  - plots/experiment_2_*.png (visualization plots)"
+    print_info ""
+    print_info "The results compare linear separability between:"
+    if [[ "$VISION_TYPE" == "both" ]]; then
+        print_info "  • Raw patch features vs VLM-transformed embeddings"
+    fi
+    print_info "  • All three baseline conditions"
+    print_info "  • R2 scores show how well actions are linearly accessible from vision features"
+    
 else
-    echo "No results file found - skipping visualizations"
+    print_error "Experiment 2 failed (exit code: $PROBE_EXIT_CODE)"
+    print_error "Check the debug output above for details"
+    exit $PROBE_EXIT_CODE
 fi
-
-echo ""
-echo "============================================="
-echo "Experiment 2 pipeline completed!"
-echo "============================================="
