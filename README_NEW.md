@@ -8,18 +8,16 @@ This is the **InSpire** repository - an implementation of Vision-Language-Action
 
 ### Current Development Goal
 
-**PRIORITY: Implement probes 3 and 4 with state reconstruction capabilities.** \
+**PRIORITY: Implement linear probing experiments on optimized trajectory data.** \
 
-**Current Focus**: Experiments 1 and 2 are complete. Now implementing experiments 3 and 4 which require simulator state reconstruction:
+**Current Focus**: Implement the four probing experiments specified in `probing/README.md`:
 
-1. ✅ **Experiment 1**: [Hidden state] -> actions - Linear regression probes for every layer's hidden states (COMPLETED)
-2. ✅ **Experiment 2**: [vision patch features] or [projected vlm embeddings] -> actions - Linear regression probes for vision patch features or projected vlm embeddings (COMPLETED)
+1. **Experiment 1**: [Hidden state] -> actions - Linear regression probes for every layer's hidden states
+2. **Experiment 2**: [vision patch features] or [projected vlm embeddings] -> actions - Linear regression probes for vision patch features or projected vlm embeddings
 3. **Experiment 3**: [Hidden state] -> visual concepts - Using simulator-derived visual/visual-language concepts
 4. **Experiment 4**: [vision patch features] or [projected vlm embeddings] -> visual concepts - Using simulator-derived visual/visual-language concepts
 
 Each experiment includes three baselines: Normal (original data), Randomized pairs (shuffled trajectories), and Noise baseline.
-
-**State Reconstruction**: Updated `vla_scripts/reconstruct_trajectory_data.py` to work with optimized data format for extracting visual concepts from simulator states.
 
 ### Available Data Types
 
@@ -132,53 +130,34 @@ The system provides complete multi-modal trajectory datasets stored in HDF5 form
 
 ### Data Processing and Loading
 - **vla_scripts/**: Trajectory data collection and loading utilities
-  - `trajectory_data_collector_optimized.py`: HDF5-based optimized trajectory data collection system  
+  - `trajectory_data_collector.py`: HDF5-based trajectory data collection system  
   - `combine_trajectory_files.py`: Combines trajectory data files from multiple parallel processes
-  - `reconstruct_trajectory_data.py`: ✅ **UPDATED** - Image and simulator state reconstruction from optimized format
-    - Smart metadata-only loading from `episode_index.h5`
-    - Index-based data access using `start_idx`/`end_idx` 
-    - Episode filtering capabilities (success, task_id, etc.)
-    - Visual concept extraction for probes 3 and 4
+  - `reconstruct_trajectory_data.py`: Image and simulator state reconstruction using stored actions
   - Additional data collection and evaluation scripts (production-ready)
 
 ## Development Commands
 
 ### Linear Probing Commands (CURRENT FOCUS)
 ```bash
-# ✅ COMPLETED: Experiments 1 and 2
+# Run Experiment 1: [Hidden state] -> actions
 cd probing
-bash probe1.sh  # [Hidden state] -> actions (COMPLETED)
-bash probe2.sh  # [Vision features] -> actions (COMPLETED)
+bash probe1.sh
 
-# 🚧 IN PROGRESS: Experiments 3 and 4 with state reconstruction
-bash probe3.sh  # [Hidden state] -> visual concepts (requires state reconstruction)
-bash probe4.sh  # [Vision features] -> visual concepts (requires state reconstruction)
-
-# Each experiment runs three baseline conditions:
-# - Normal: Original data -> targets
+# This automatically runs all three baseline conditions:
+# - Normal: Original hidden states -> actions
 # - Randomized: Shuffled pairs (tests chance performance)  
 # - Noise: Gaussian targets (tests overfitting)
-```
 
-### State Reconstruction Commands
-```bash
-# Test reconstruction functionality
-cd vla_scripts
-python test_reconstruction.py
+# Generates:
+# - Complete results JSON files
+# - Per-layer detailed results  
+# - Publication-ready PNG visualizations
+# - R2/MSE metrics across all transformer layers
 
-# Smart metadata loading (fast)
-python reconstruct_trajectory_data.py /work/nvme/bfbo/xzhang42/data/pilot_test/optimized_trajectory_data/ --metadata-only
-
-# Reconstruct states for visual concept extraction
-python reconstruct_trajectory_data.py /work/nvme/bfbo/xzhang42/data/pilot_test/optimized_trajectory_data/ \
-    --states-output-dir /work/nvme/bfbo/xzhang42/reconstructed_states \
-    --filter-success \
-    --max-episodes 5
-
-# Reconstruct specific episode by index
-python reconstruct_trajectory_data.py /work/nvme/bfbo/xzhang42/data/pilot_test/optimized_trajectory_data/ \
-    --states-output-dir /work/nvme/bfbo/xzhang42/reconstructed_states \
-    --episode-idx 0
+# Future experiments (not yet implemented):
+# - probe2.sh: [Vision encoder outputs] -> actions
+# - probe3.sh: [Hidden state] -> visual concepts
+# - probe4.sh: [Vision encoder outputs] -> visual concepts
 ```
 
 ### HPC/SLURM Usage
@@ -188,25 +167,27 @@ This project is designed for HPC environments. Key SLURM batch scripts:
 - `test.sbatch`: Quick testing script
 
 
-## Linear Probing Experiments ✅ UPDATED FOR PROBES 3 & 4
+## Linear Probing Experiments ✅ PRODUCTION DATA READY
 
-The trajectory data collection pipeline is complete and production-ready. Experiments 1-2 are complete, now implementing 3-4 with state reconstruction.
+The trajectory data collection pipeline is complete and production-ready. Focus is now on implementing linear probing experiments to analyze VLA representations.
 
-### Experiment Status:
-1. ✅ **[Hidden state] -> actions**: Linear regression probes for every layer's hidden states (COMPLETED)
-2. ✅ **[Vision encoder outputs] -> actions**: Linear regression probes for vision patch features (COMPLETED)  
-3. 🚧 **[Hidden state] -> visual concepts**: Using simulator-derived visual/visual-language concepts (IN PROGRESS)
-4. 🚧 **[Vision encoder outputs] -> visual concepts**: Using simulator-derived visual/visual-language concepts (IN PROGRESS)
+### Experiment Requirements (from probing/README.md):
+1. **[Hidden state] -> actions**: Linear regression probes for every layer's hidden states
+2. **[Vision encoder outputs] -> actions**: Linear regression probes for vision patch features
+3. **[Hidden state] -> visual concepts**: Using simulator-derived visual/visual-language concepts (TBD)
+4. **[Vision encoder outputs] -> visual concepts**: Using simulator-derived visual/visual-language concepts (TBD)
 
-### State Reconstruction for Visual Concepts:
-**Updated reconstruction pipeline** enables probes 3 and 4:
-- **Smart metadata loading**: Efficient episode selection from `episode_index.h5`
-- **Optimized data access**: Index-based loading from flat arrays
-- **Visual concept extraction**: Simulator states → spatial relationships, object properties, contact information
-- **Episode filtering**: Success-based, task-specific reconstruction
+Each experiment requires three baselines: Normal (original data), Randomized pairs (shuffled trajectories), Noise baseline.
 
-### Next Steps:
-1. Test reconstruction with `python test_reconstruction.py`
-2. Extract visual concepts from reconstructed simulator states
-3. Implement probe3.sh and probe4.sh experiments
-4. Define visual concept targets (object positions, contact states, spatial relationships)
+### Implementation Structure:
+- `probing/probe.py`: Main experiment runner with argument parsing and experiment dispatch
+- `probing/probe.sh`: Bash wrapper script with configurable data path  
+- `probing/linear_probe.py`: Shared linear regression implementation with R2/MSE evaluation
+- `probing/visualize_results.py`: Visualization utilities for generating PNG plots
+- Result files: Structured output files for each experiment with metrics and visualizations
+
+### Key Implementation Notes:
+- Add comprehensive debug prints for function verification and efficient bug detection
+- Save results to structured files for each experiment condition
+- Generate PNG visualizations (no plt.show() on server)
+- Design modular structure to accommodate all four experiments incrementally
