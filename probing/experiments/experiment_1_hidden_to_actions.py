@@ -162,62 +162,57 @@ def run_experiment_1(
                 print(f"[DEBUG] Processing layer {layer_idx}, generation step {gen_step}...")
             
             # Extract hidden states for this layer and generation step
-            try:
-                hidden_states_flat, hidden_metadata = get_layer_data_flat(
-                    dataset, layer_idx=layer_idx, generation_step=gen_step, include_metadata=True
-                )
-                
-                if len(hidden_states_flat) == 0:
-                    if debug:
-                        print(f"[DEBUG] No data for layer {layer_idx}, gen step {gen_step}")
-                    continue
-                
+
+            hidden_states_flat, hidden_metadata = get_layer_data_flat(
+                dataset, layer_idx=layer_idx, generation_step=gen_step, include_metadata=True
+            )
+            
+            if len(hidden_states_flat) == 0:
                 if debug:
-                    print(f"[DEBUG] Hidden states shape: {hidden_states_flat.shape}")
-                    print(f"[DEBUG] Hidden states range: [{hidden_states_flat.min():.3f}, {hidden_states_flat.max():.3f}]")
-                
-                # Ensure we have matching data
-                min_samples = min(len(hidden_states_flat), len(actions_flat))
-                hidden_states_matched = hidden_states_flat[:min_samples]
-                actions_matched = actions_flat[:min_samples]
-                
-                if debug:
-                    print(f"[DEBUG] Using {min_samples} matched samples")
-                    print(f"[DEBUG] Final shapes - Hidden: {hidden_states_matched.shape}, Actions: {actions_matched.shape}")
-                
-                # Run linear probes with all baselines
-                probe_name = f"layer_{layer_idx}_gen_{gen_step}_to_actions"
-                
-                probe_results = run_probe_with_baselines(
-                    X=hidden_states_matched,
-                    y=actions_matched, 
-                    probe_name=probe_name,
-                    task_type='regression',
-                    test_size=test_size,
-                    random_seed=random_seed,
-                    debug=debug
-                )
-                
-                layer_results[f'generation_step_{gen_step}'] = probe_results
-                
-                # Save individual probe results
-                probe_file = output_path / f'layer_{layer_idx}_gen_{gen_step}_results.json'
-                save_probe_results(probe_results, probe_file)
-                
-                if debug:
-                    if 'summary' in probe_results:
-                        summary = probe_results['summary']
-                        print(f"[DEBUG] Layer {layer_idx} Gen {gen_step} Results:")
-                        print(f"[DEBUG] - Normal R2: {probe_results['normal']['r2_test']:.4f}")
-                        print(f"[DEBUG] - Random R2: {probe_results['randomized']['r2_test']:.4f}")  
-                        print(f"[DEBUG] - Noise R2: {probe_results['noise']['r2_test']:.4f}")
-                        print(f"[DEBUG] - Linear separability strength: {summary['linear_separability_strength']:.4f}")
-                        
-            except Exception as e:
-                if debug:
-                    print(f"[DEBUG] ERROR processing layer {layer_idx}, gen step {gen_step}: {e}")
-                layer_results[f'generation_step_{gen_step}'] = {'error': str(e)}
-        
+                    print(f"[DEBUG] No data for layer {layer_idx}, gen step {gen_step}")
+                continue
+            
+            if debug:
+                print(f"[DEBUG] Hidden states shape: {hidden_states_flat.shape}")
+                print(f"[DEBUG] Hidden states range: [{hidden_states_flat.min():.3f}, {hidden_states_flat.max():.3f}]")
+            
+            # Ensure we have matching data
+            min_samples = min(len(hidden_states_flat), len(actions_flat))
+            hidden_states_matched = hidden_states_flat[:min_samples]
+            actions_matched = actions_flat[:min_samples]
+            
+            if debug:
+                print(f"[DEBUG] Using {min_samples} matched samples")
+                print(f"[DEBUG] Final shapes - Hidden: {hidden_states_matched.shape}, Actions: {actions_matched.shape}")
+            
+            # Run linear probes with all baselines
+            probe_name = f"layer_{layer_idx}_gen_{gen_step}_to_actions"
+            
+            probe_results = run_probe_with_baselines(
+                X=hidden_states_matched,
+                y=actions_matched, 
+                probe_name=probe_name,
+                task_type='regression',
+                test_size=test_size,
+                random_seed=random_seed,
+                debug=debug
+            )
+            
+            layer_results[f'generation_step_{gen_step}'] = probe_results
+            
+            # Save individual probe results
+            probe_file = output_path / f'layer_{layer_idx}_gen_{gen_step}_results.json'
+            save_probe_results(probe_results, probe_file)
+            
+            if debug:
+                if 'summary' in probe_results:
+                    summary = probe_results['summary']
+                    print(f"[DEBUG] Layer {layer_idx} Gen {gen_step} Results:")
+                    print(f"[DEBUG] - Normal R2: {probe_results['normal']['r2_test']:.4f}")
+                    print(f"[DEBUG] - Random R2: {probe_results['randomized']['r2_test']:.4f}")  
+                    print(f"[DEBUG] - Noise R2: {probe_results['noise']['r2_test']:.4f}")
+                    print(f"[DEBUG] - Linear separability strength: {summary['linear_separability_strength']:.4f}")
+
         experiment_results['results_by_layer'][f'layer_{layer_idx}'] = layer_results
     
     # Compute experiment-wide summary statistics

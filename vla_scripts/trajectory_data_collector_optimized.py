@@ -53,6 +53,7 @@ class OptimizedTrajectoryDataCollector:
             'hidden_states': defaultdict(lambda: defaultdict(list)),  # generation_step -> layer_idx -> list of samples
             'actions': [],
             'vision_features': [],
+            'vlm_embeddings': [],
             'episodes': []  # Episode metadata with indexing info
         }
         
@@ -111,6 +112,18 @@ class OptimizedTrajectoryDataCollector:
                     self.accumulated_data['vision_features'].append(vision_feat)
                 else:
                     print(f"WARNING: No vision features for task_{task_id}/episode_{episode_id}/timestep_{timestep_idx}")
+                
+                # Accumulate VLM embeddings
+                if 'vlm_embeddings' in timestep_data:
+                    vlm_embed = timestep_data['vlm_embeddings']
+                    if vlm_embed is not None:
+                        if not isinstance(vlm_embed, np.ndarray):
+                            vlm_embed = np.array(vlm_embed)
+                        self.accumulated_data['vlm_embeddings'].append(vlm_embed)
+                    else:
+                        print(f"INFO: VLM embeddings is None for task_{task_id}/episode_{episode_id}/timestep_{timestep_idx}")
+                else:
+                    print(f"WARNING: No VLM embeddings for task_{task_id}/episode_{episode_id}/timestep_{timestep_idx}")
                 
                 # Accumulate hidden states by generation step and layer (NEW FORMAT)
                 if 'hidden_states' in timestep_data:
@@ -187,6 +200,14 @@ class OptimizedTrajectoryDataCollector:
                 with h5py.File(vision_path, 'w') as f:
                     f.create_dataset('vision_features', data=vision_array, **compression_kwargs)
                 print(f"[OPTIMIZED_COLLECTOR] Saved vision features: {vision_array.shape}")
+            
+            # Save VLM embeddings
+            if self.accumulated_data['vlm_embeddings']:
+                vlm_path = self.temp_dir / "vlm_embeddings_chunk.h5"
+                vlm_array = np.stack(self.accumulated_data['vlm_embeddings'], axis=0)
+                with h5py.File(vlm_path, 'w') as f:
+                    f.create_dataset('vlm_embeddings', data=vlm_array, **compression_kwargs)
+                print(f"[OPTIMIZED_COLLECTOR] Saved VLM embeddings: {vlm_array.shape}")
             
             # Save hidden states by generation step (NEW FORMAT)
             hidden_states_dir = self.temp_dir / "hidden_states"
@@ -343,6 +364,22 @@ def combine_chunks_to_optimized_format(
         with h5py.File(vision_output_path, 'w') as f:
             f.create_dataset('vision_features', data=combined_vision, **compression_kwargs)
         print(f"[CHUNK_COMBINER] Saved combined vision features: {combined_vision.shape}")
+    
+    # Combine VLM embeddings
+    print(f"[CHUNK_COMBINER] Combining VLM embeddings...")
+    vlm_chunks = []
+    for manifest in manifests:
+        vlm_path = manifest['process_dir'] / "vlm_embeddings_chunk.h5"
+        if vlm_path.exists():
+            with h5py.File(vlm_path, 'r') as f:
+                vlm_chunks.append(f['vlm_embeddings'][:])
+    
+    if vlm_chunks:
+        combined_vlm = np.concatenate(vlm_chunks, axis=0)
+        vlm_output_path = output_dir / "vlm_embeddings.h5"
+        with h5py.File(vlm_output_path, 'w') as f:
+            f.create_dataset('vlm_embeddings', data=combined_vlm, **compression_kwargs)
+        print(f"[CHUNK_COMBINER] Saved combined VLM embeddings: {combined_vlm.shape}")
     
     # Combine hidden states by generation step (NEW FORMAT)
     hidden_states_output_dir = output_dir / "hidden_states"

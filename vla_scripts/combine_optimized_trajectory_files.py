@@ -64,11 +64,7 @@ def main():
         print(f"WARNING: The following processes appear incomplete (no manifest file):")
         for process_name in incomplete_processes:
             print(f"  - {process_name}")
-        
-        response = input("Continue anyway? (y/N): ")
-        if response.lower() != 'y':
-            print("Aborting combination.")
-            return 1
+        print("Continuing anyway (auto-continue enabled)...")
     
     try:
         # Run the combination

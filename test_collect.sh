@@ -118,13 +118,8 @@ if [[ "$EXPECTED_TRAJECTORIES" -gt 50 ]]; then
     echo "WARNING: This will collect $EXPECTED_TRAJECTORIES trajectories."
     echo "For pilot testing, consider using fewer tasks/trials."
     echo "Recommended: --num-tasks 2 --num-trials 8 (16 trajectories)"
+    echo "Auto-continuing for batch processing..."
     echo ""
-    read -p "Continue anyway? (y/N): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Aborted."
-        exit 0
-    fi
 fi
 
 # Set environment variables
@@ -141,6 +136,7 @@ mkdir -p "$SAVE_DIR/trajectory_data"
 
 echo "=== Step 1: Collecting Pilot Trajectory Data ==="
 echo "Starting data collection for $NUM_TASKS tasks (pilot test)..."
+echo "NOTE: Testing VLM embeddings collection alongside vision features"
 
 # Run trajectory data collection with early stopping
 python /u/xzhang42/Inspire/vla_scripts/parallel_libero_evaluator.py \
@@ -162,6 +158,7 @@ echo "Pilot data collection completed successfully"
 
 echo "=== Step 2: Combining Optimized Pilot Data Files ==="
 echo "Combining chunk files from pilot run into optimized format..."
+echo "NOTE: Including VLM embeddings in optimized format"
 
 # Combine trajectory data files into optimized multi-file format
 python /u/xzhang42/Inspire/vla_scripts/combine_optimized_trajectory_files.py \
@@ -186,6 +183,7 @@ echo "✓ Optimized pilot trajectory data created: $OPTIMIZED_DIR"
 
 # Check optimized format structure
 echo "=== Step 3: Verifying Optimized Pilot Data ==="
+OPTIMIZED_DIR="$SAVE_DIR/optimized_trajectory_data"
 python -c "
 import sys
 sys.path.append('/u/xzhang42/Inspire')
@@ -217,6 +215,17 @@ if optimized_dir.exists():
             load_time = time.time() - start_time
             print(f'✓ Loaded layer {test_layer}: {hidden_states.shape} in {load_time:.3f}s')
             print(f'✓ Performance test passed - optimized loading works!')
+        
+        # Test VLM embeddings loading
+        print(f'\\n=== VLM Embeddings Test ===')
+        start_time = time.time()
+        vlm_embeddings, episodes = loader.load_vlm_embeddings_data()
+        load_time = time.time() - start_time
+        if vlm_embeddings.size > 0:
+            print(f'✓ Loaded VLM embeddings: {vlm_embeddings.shape} in {load_time:.3f}s')
+            print(f'✓ VLM embeddings collection successful!')
+        else:
+            print(f'⚠ VLM embeddings array is empty - may indicate collection issue')
         
     except Exception as e:
         print(f'ERROR: Failed to verify pilot data: {e}')
@@ -250,7 +259,8 @@ echo "Pilot data location: $SAVE_DIR"
 echo "├── optimized_trajectory_data/            # Optimized multi-file format"
 echo "│   ├── hidden_states/                    # Individual layer files"
 echo "│   ├── actions.h5                        # Action data"
-echo "│   ├── vision_features.h5                # Vision encoder features"
+echo "│   ├── vision_features.h5                # Raw vision encoder features"
+echo "│   ├── vlm_embeddings.h5                 # VLM-transformed visual embeddings"
 echo "│   └── episode_index.h5                  # Episode metadata & indexing"
 echo "├── results/                              # Evaluation results"
 echo ""

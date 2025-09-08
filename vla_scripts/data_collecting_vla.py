@@ -146,10 +146,12 @@ class DataCollectingVLA(OpenVLA):
         with torch.autocast("cuda", dtype=autocast_dtype, enabled=self.enable_mixed_precision_training):
             if self.collect_data:
                 
-                # Capture vision encoder features before generation
-                vision_features = self._extract_vision_features(pixel_values)
+                # Capture both raw vision features and VLM-transformed embeddings
+                vision_features, vlm_embeddings = self._extract_vision_features(pixel_values)
                 if vision_features is not None:
                     collected_data['vision_features'] = vision_features
+                if vlm_embeddings is not None:
+                    collected_data['vlm_embeddings'] = vlm_embeddings
                 
                 # Enable hidden state output for data collection  
                 # Use same call as original predict_action: super(PrismaticVLM, self).generate
@@ -245,13 +247,14 @@ class DataCollectingVLA(OpenVLA):
     
     def _extract_vision_features(self, pixel_values):
         """
-        Extract vision encoder patch features from pixel values.
-        This captures the raw output from the vision backbone (DINOv2/CLIP/SigLIP etc.)
-        before projection to LLM embedding space.
+        Extract both raw vision encoder patch features AND VLM-transformed visual embeddings.
+        This captures:
+        1. Raw patch features from vision backbone (DINOv2/CLIP/SigLIP etc.)
+        2. VLM-processed visual embeddings after projection layers
+        
+        Returns tuple: (raw_patch_features_np, vlm_visual_embeddings_np)
         """
         try:
-            
-            
             # Run Visual Feature Extraction (same logic as PrismaticVLM.forward line 370-372)
             with torch.set_grad_enabled(self.vision_backbone_requires_grad):
                 if isinstance(pixel_values, dict):
@@ -261,16 +264,67 @@ class DataCollectingVLA(OpenVLA):
                     patch_features = self.vision_backbone(pixel_values)
                     print(f"[debug-visual] Tensor input - vision backbone output shape: {patch_features.shape}")
             
-            # Convert to numpy for storage (same approach as hidden states)
+            # Convert raw patch features to numpy for storage
             if patch_features.dtype == torch.bfloat16:
                 vision_features_np = patch_features.detach().cpu().float().numpy()
             else:
                 vision_features_np = patch_features.detach().cpu().numpy()
+            
+            # Extract VLM-transformed visual embeddings from the same patch features
+            vlm_embeddings_np = self._extract_vlm_embeddings_from_patches(patch_features)
 
-            return vision_features_np
+            return vision_features_np, vlm_embeddings_np
             
         except Exception as e:
             print(f"ERROR extracting vision features: {e}")
+            import traceback
+            traceback.print_exc()
+            return None, None
+    
+    def _extract_vlm_embeddings_from_patches(self, patch_features):
+        """
+        Extract VLM-transformed visual embeddings from raw patch features.
+        This uses the model's actual projector to transform patches to LLM embedding space.
+        """
+        try:
+            # Look for the projector in the model (this transforms patches to LLM space)
+            if hasattr(self, 'projector') and self.projector is not None:
+                # Standard path - projector is a direct attribute
+                vlm_embeddings = self.projector(patch_features)
+                print(f"[debug-visual] VLM projector output shape: {vlm_embeddings.shape}")
+                
+            elif hasattr(self, 'vision_backbone') and hasattr(self.vision_backbone, 'projector'):
+                # Alternative: projector might be part of vision backbone
+                vlm_embeddings = self.vision_backbone.projector(patch_features)
+                print(f"[debug-visual] Vision backbone projector output shape: {vlm_embeddings.shape}")
+                
+            else:
+                # Search for projector in the model hierarchy
+                projector = None
+                for name, module in self.named_modules():
+                    if 'projector' in name.lower() or 'projection' in name.lower():
+                        print(f"[debug-visual] Found potential projector: {name}")
+                        projector = module
+                        break
+                
+                if projector is not None:
+                    vlm_embeddings = projector(patch_features)
+                    print(f"[debug-visual] Found projector output shape: {vlm_embeddings.shape}")
+                else:
+                    print(f"[debug-visual] No projector found, cannot extract VLM embeddings")
+                    return None
+            
+            # Convert to numpy for storage (same approach as patch features)
+            if vlm_embeddings.dtype == torch.bfloat16:
+                vlm_embeddings_np = vlm_embeddings.detach().cpu().float().numpy()
+            else:
+                vlm_embeddings_np = vlm_embeddings.detach().cpu().numpy()
+            
+            print(f"[debug-visual] VLM embeddings converted to numpy shape: {vlm_embeddings_np.shape}")
+            return vlm_embeddings_np
+                
+        except Exception as e:
+            print(f"ERROR extracting VLM embeddings from patches: {e}")
             import traceback
             traceback.print_exc()
             return None

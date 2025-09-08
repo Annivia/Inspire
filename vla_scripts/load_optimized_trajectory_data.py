@@ -348,6 +348,47 @@ class OptimizedTrajectoryLoader:
         
         return vision_features, filtered_episodes
     
+    def load_vlm_embeddings_data(self,
+                                tasks: Optional[List[int]] = None,
+                                episodes: Optional[List[int]] = None,
+                                successful_only: bool = True) -> Tuple[np.ndarray, pd.DataFrame]:
+        """
+        Load VLM embeddings data with episode filtering.
+        
+        Returns:
+            Tuple of (vlm_embeddings_array, episode_metadata)
+        """
+        print(f"[OPTIMIZED_LOADER] Loading VLM embeddings...")
+        
+        # Filter episodes
+        filtered_episodes = self._filter_episodes(tasks, episodes, successful_only)
+        
+        if len(filtered_episodes) == 0:
+            return np.array([]), pd.DataFrame()
+        
+        # Load VLM embeddings
+        vlm_path = self.data_dir / "vlm_embeddings.h5"
+        if not vlm_path.exists():
+            print(f"[OPTIMIZED_LOADER] VLM embeddings file not found: {vlm_path}")
+            return np.array([]), filtered_episodes
+            
+        start_time = time.time()
+        
+        with h5py.File(vlm_path, 'r') as f:
+            vlm_dataset = f['vlm_embeddings']
+            
+            # Collect sample indices
+            sample_indices = []
+            for _, episode in filtered_episodes.iterrows():
+                sample_indices.extend(range(episode['start_idx'], episode['end_idx'] + 1))
+            
+            vlm_embeddings = vlm_dataset[sample_indices]
+        
+        load_time = time.time() - start_time
+        print(f"[OPTIMIZED_LOADER] Loaded VLM embeddings: {vlm_embeddings.shape} in {load_time:.2f}s")
+        
+        return vlm_embeddings, filtered_episodes
+    
     def _filter_episodes(self,
                         tasks: Optional[List[int]] = None,
                         episodes: Optional[List[int]] = None,
@@ -379,6 +420,7 @@ class OptimizedTrajectoryLoader:
             'data_files': {
                 'actions': (self.data_dir / "actions.h5").exists(),
                 'vision_features': (self.data_dir / "vision_features.h5").exists(),
+                'vlm_embeddings': (self.data_dir / "vlm_embeddings.h5").exists(),
                 'hidden_states': len(list((self.data_dir / "hidden_states").glob("layer_*.h5"))),
                 'episode_index': (self.data_dir / "episode_index.h5").exists()
             }
@@ -420,9 +462,10 @@ def load_trajectory_dataset(data_path: Union[str, Path],
     filtered_episodes = loader._filter_episodes(tasks, episodes, successful_only)
     metadata = filtered_episodes.to_dict('records')
     
-    # Load actions and vision features
+    # Load actions, vision features, and VLM embeddings
     actions_array, _ = loader.load_actions_data(tasks, episodes, successful_only)
     vision_array, _ = loader.load_vision_features_data(tasks, episodes, successful_only)
+    vlm_embeddings_array, _ = loader.load_vlm_embeddings_data(tasks, episodes, successful_only)
     
     # Load hidden states - NEW: Support both generation step and legacy formats
     hidden_states = {}
@@ -475,11 +518,13 @@ def load_trajectory_dataset(data_path: Union[str, Path],
     print(f"  Layers loaded: {len(hidden_states)}")
     print(f"  Actions shape: {actions_array.shape}")
     print(f"  Vision features shape: {vision_array.shape}")
+    print(f"  VLM embeddings shape: {vlm_embeddings_array.shape}")
     
     return {
         'hidden_states': hidden_states,
         'actions': actions_array,
         'vision_features': vision_array,
+        'vlm_embeddings': vlm_embeddings_array,
         'metadata': metadata,
         'summary': summary
     }
@@ -602,6 +647,35 @@ def get_vision_features_data_flat(dataset: Dict,
         return vision_features, metadata_list
     else:
         return vision_features, None
+
+
+def get_vlm_embeddings_data_flat(dataset: Dict,
+                                include_metadata: bool = True) -> Tuple[np.ndarray, Optional[List[Dict]]]:
+    """
+    Extract flattened VLM embeddings data.
+    Compatible with original API.
+    """
+    vlm_embeddings = dataset['vlm_embeddings']
+    
+    if include_metadata:
+        # Create metadata for each sample
+        metadata_list = []
+        
+        for episode_meta in dataset['metadata']:
+            num_timesteps = episode_meta['num_timesteps']
+            for timestep_id in range(num_timesteps):
+                sample_meta = {
+                    'task_id': episode_meta['task_id'],
+                    'episode_id': episode_meta['episode_id'],
+                    'timestep_id': timestep_id,
+                    'task_description': episode_meta['task_description'],
+                    'success': episode_meta['success']
+                }
+                metadata_list.append(sample_meta)
+        
+        return vlm_embeddings, metadata_list
+    else:
+        return vlm_embeddings, None
 
 
 if __name__ == "__main__":
