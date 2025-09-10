@@ -80,7 +80,7 @@ def extract_concepts_from_states(states: Dict[str, np.ndarray], task_description
     return concepts_timeline
 
 
-def create_concept_visualization_frame(concepts: Dict, timestep: int, frame_size: Tuple[int, int] = (1000, 800)) -> Image.Image:
+def create_concept_visualization_frame(concepts: Dict, timestep: int, frame_size: Tuple[int, int] = (1000, 800), task_description: str = "") -> Image.Image:
     """
     Create a single frame showing visual concept values.
     
@@ -131,12 +131,8 @@ def create_concept_visualization_frame(concepts: Dict, timestep: int, frame_size
                    outline='blue', width=2, fill='lightblue')
     draw.text((task_prompt_x, task_prompt_y - 5), "LIBERO Task:", fill='darkblue', font=title_font)
     
-    # Use the task description from configuration, or a default if empty
-    if TASK_DESCRIPTION:
-        task_text = TASK_DESCRIPTION
-    else:
-        # Extract task description from concepts if available
-        task_text = "Task description not specified"
+    # Use the task description passed to this function
+    task_text = task_description if task_description else "Task description not specified"
     
     # Word wrap the task description
     import textwrap
@@ -364,7 +360,7 @@ def create_concepts_gif(
     frames = []
     
     for timestep, concepts in enumerate(concepts_timeline):
-        frame = create_concept_visualization_frame(concepts, timestep, frame_size)
+        frame = create_concept_visualization_frame(concepts, timestep, frame_size, task_description)
         frames.append(frame)
         
         if timestep % 10 == 0:
@@ -425,14 +421,17 @@ def debug_single_episode(
                         task_descriptions = f['task_description'][:]
                         
                         # Find the episode that matches our task_id and episode_id
+                        print(f"[debug-viz] Looking for task_id={task_id}, episode_id={episode_id}")
+                        print(f"[debug-viz] Available combinations:")
                         for i, (t_id, e_id) in enumerate(zip(task_ids, episode_ids)):
+                            print(f"  Index {i}: task_id={t_id}, episode_id={e_id}")
                             if int(t_id) == task_id and int(e_id) == episode_id:
                                 raw_desc = task_descriptions[i]
                                 if hasattr(raw_desc, 'decode'):
                                     task_description = raw_desc.decode('utf-8')
                                 else:
                                     task_description = str(raw_desc)
-                                print(f"[debug-viz] Found task description: '{task_description}'")
+                                print(f"[debug-viz] ✓ FOUND MATCH at index {i}: '{task_description}'")
                                 break
                         
                         if not task_description:
