@@ -33,95 +33,15 @@ import threading
 import time
 from collections import defaultdict
 
+# Import shared visual concepts infrastructure
+from vla_scripts.visual_concepts_extractor import extract_simulator_state as extract_state_shared
+
 
 def extract_simulator_state(env):
     """
-    Extract comprehensive simulator state as structured numpy arrays (tensor format).
-    
-    Returns:
-        Dict containing tensors for robot state, object positions, contact info, etc.
+    Drop-in replacement using shared visual concepts infrastructure.
     """
-    sim_state = {}
-    
-    try:
-        # Get MuJoCo simulation data
-        sim = env.sim
-        
-        # Robot joint positions and velocities (fixed size tensors)
-        sim_state['robot_joint_pos'] = sim.data.qpos[:7].copy().astype(np.float32)
-        sim_state['robot_joint_vel'] = sim.data.qvel[:7].copy().astype(np.float32)
-        
-        # End-effector position and orientation (fixed size tensors)
-        ee_pos = sim.data.site_xpos[sim.model.site_name2id('gripper0_grip_site')].copy()
-        ee_quat = sim.data.get_body_xquat('gripper0_eef').copy()
-        sim_state['ee_pos'] = ee_pos.astype(np.float32)  # [3]
-        sim_state['ee_quat'] = ee_quat.astype(np.float32)  # [4]
-        
-        # All object positions and orientations as structured tensors
-        object_positions = []
-        object_orientations = []
-        object_names = []
-        
-        for body_id in range(sim.model.nbody):
-            body_name = sim.model.body_id2name(body_id)
-            if body_name and not body_name.startswith('robot0'):  # Skip robot bodies
-                pos = sim.data.body_xpos[body_id].copy()
-                quat = sim.data.body_xquat[body_id].copy()
-                object_positions.append(pos)
-                object_orientations.append(quat)
-                object_names.append(body_name)
-        
-        # Convert to numpy arrays for efficient storage
-        if object_positions:
-            sim_state['object_positions'] = np.stack(object_positions, axis=0).astype(np.float32)  # [N_objects, 3]
-            sim_state['object_orientations'] = np.stack(object_orientations, axis=0).astype(np.float32)  # [N_objects, 4]
-            # Store names separately for indexing
-            sim_state['object_names'] = np.array([name.encode('utf-8') for name in object_names], dtype='S64')
-        else:
-            sim_state['object_positions'] = np.zeros((0, 3), dtype=np.float32)
-            sim_state['object_orientations'] = np.zeros((0, 4), dtype=np.float32)
-            sim_state['object_names'] = np.array([], dtype='S64')
-        
-        # Contact information as structured arrays
-        if sim.data.ncon > 0:
-            contact_geom1 = np.array([sim.data.contact[i].geom1 for i in range(sim.data.ncon)], dtype=np.int32)
-            contact_geom2 = np.array([sim.data.contact[i].geom2 for i in range(sim.data.ncon)], dtype=np.int32)
-            contact_pos = np.array([sim.data.contact[i].pos.copy() for i in range(sim.data.ncon)], dtype=np.float32)
-            contact_dist = np.array([sim.data.contact[i].dist for i in range(sim.data.ncon)], dtype=np.float32)
-            
-            sim_state['contact_geom1'] = contact_geom1
-            sim_state['contact_geom2'] = contact_geom2  
-            sim_state['contact_pos'] = contact_pos  # [N_contacts, 3]
-            sim_state['contact_dist'] = contact_dist  # [N_contacts]
-        else:
-            sim_state['contact_geom1'] = np.array([], dtype=np.int32)
-            sim_state['contact_geom2'] = np.array([], dtype=np.int32)
-            sim_state['contact_pos'] = np.zeros((0, 3), dtype=np.float32)
-            sim_state['contact_dist'] = np.array([], dtype=np.float32)
-        
-        # Time and physics info as scalars
-        sim_state['time'] = np.float32(sim.data.time)
-        
-    except Exception as e:
-        print(f"[debug-state] WARNING: Could not extract full simulator state: {e}")
-        # Fallback to empty tensors
-        sim_state = {
-            'robot_joint_pos': np.zeros(7, dtype=np.float32),
-            'robot_joint_vel': np.zeros(7, dtype=np.float32),
-            'ee_pos': np.zeros(3, dtype=np.float32),
-            'ee_quat': np.array([0, 0, 0, 1], dtype=np.float32),
-            'object_positions': np.zeros((0, 3), dtype=np.float32),
-            'object_orientations': np.zeros((0, 4), dtype=np.float32),
-            'object_names': np.array([], dtype='S64'),
-            'contact_geom1': np.array([], dtype=np.int32),
-            'contact_geom2': np.array([], dtype=np.int32),
-            'contact_pos': np.zeros((0, 3), dtype=np.float32),
-            'contact_dist': np.array([], dtype=np.float32),
-            'time': np.float32(0.0),
-            'error': str(e)
-        }
-        
-    return sim_state
+    return extract_state_shared(env)
 
 
 def load_episode_metadata(dataset_dir: str) -> pd.DataFrame:
