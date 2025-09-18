@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from PIL import Image
+from PIL import ImageDraw, ImageFont
 import sys
 import json
 from typing import Dict, List, Optional, Tuple
@@ -34,14 +35,56 @@ import time
 from collections import defaultdict
 
 # Import shared visual concepts infrastructure
-from vla_scripts.visual_concepts_extractor import extract_simulator_state as extract_state_shared
+from vla_scripts.visual_concepts_extractor import (
+    enumerate_concept_keys,
+    CSVRelationsRecorder,
+    accumulate_relations_over_time,
+)
+from vla_scripts.state_io import StateChunkWriter, resolve_paths, combine_state_chunks
 
 
-def extract_simulator_state(env):
+def _sanitize(s: str) -> str:
+    import re
+    s = (s or "").strip().lower()
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"[^a-z0-9_\-]", "", s)
+    return s or "task"
+
+def _get_task_identifiers_from_env(control_or_bddl_env) -> Tuple[str, str]:
+    """Robust task identifiers following LIBERO conventions.
+
+    Priority:
+    1) BDDL env class name (lowercased) — enforced to match parsed problem_name
+    2) ControlEnv.problem_name / language_instruction if available
+    3) parsed_problem fields as fallback
     """
-    Drop-in replacement using shared visual concepts infrastructure.
-    """
-    return extract_state_shared(env)
+    # Unwrap ControlEnv if needed
+    bddl_env = control_or_bddl_env.env if hasattr(control_or_bddl_env, "env") else control_or_bddl_env
+    # Preferred: class name of BDDL env (matched by _assert_problem_name)
+    try:
+        problem_name = bddl_env.__class__.__name__.lower()
+    except Exception:
+        problem_name = None
+
+    # Language instruction
+    language = None
+    try:
+        language = getattr(control_or_bddl_env, "language_instruction", None)
+    except Exception:
+        language = None
+
+    # Fallbacks from parsed_problem if available
+    try:
+        parsed = getattr(bddl_env, "parsed_problem", {}) or {}
+        if not problem_name:
+            problem_name = str(parsed.get("problem_name", ""))
+        if not language:
+            li = parsed.get("language_instruction", [])
+            language = " ".join(li) if isinstance(li, list) else str(li)
+    except Exception:
+        pass
+
+    return str(problem_name or ""), str(language or "")
 
 
 def load_episode_metadata(dataset_dir: str) -> pd.DataFrame:
@@ -246,7 +289,12 @@ def reconstruct_trajectory_episode(
     images_output_dir: str = None,
     states_output_dir: str = None,
     episode_metadata: pd.DataFrame = None,
-    enable_rendering: bool = True
+    enable_rendering: bool = True,
+    state_writer: StateChunkWriter = None,
+    concepts_recorders: Optional[Dict[str, CSVRelationsRecorder]] = None,
+    concepts_root_dir: str = None,
+    render_concepts: bool = False,
+    concepts_only_changing: bool = True,
 ):
     """
     Reconstruct a single episode trajectory using stored actions from optimized format.
@@ -354,17 +402,127 @@ def reconstruct_trajectory_episode(
         if images_output_dir:
             episode_img_dir = Path(images_output_dir) / f"task_{task_id}" / f"episode_{episode_id}"
             episode_img_dir.mkdir(parents=True, exist_ok=True)
-            
-        if states_output_dir:
-            episode_state_dir = Path(states_output_dir) / f"task_{task_id}" / f"episode_{episode_id}" 
-            episode_state_dir.mkdir(parents=True, exist_ok=True)
-        
+
+        # Prepare concepts recorder (per-task, persisted across episodes), using LIBERO identifiers
+        task_name, language = _get_task_identifiers_from_env(env)
+        concepts_recorder = None
+        if concepts_recorders is not None:
+            # Key recorders by language instruction to avoid task-name collisions
+            key_name = language if language else task_name
+            key = _sanitize(key_name)
+            if key not in concepts_recorders:
+                # Initialize with concepts enumerated from this scene
+                concepts = enumerate_concept_keys(env)
+                rec = CSVRelationsRecorder(task_name=task_name, language=language)
+                rec.initialize(concepts)
+                concepts_recorders[key] = rec
+            concepts_recorder = concepts_recorders[key]
+        # Per-episode concept snapshots (for combined rendering)
+        episode_concept_snapshots: List[Dict[str, int]] = []
+
+        # Episode meta for state writer (aligned to existing indices)
+        if state_writer is not None:
+            ep_meta = {
+                "episode_idx": int(episode_idx if "episode_idx" in episode_info else episode_id),
+                "episode_id": int(episode_id),
+                "task_name": str(task_name),
+                "task_id": int(task_id),
+                "language_instruction": language,
+                "success": bool(episode_info.get("success", True)),
+                "num_timesteps": int(num_timesteps),
+                "orig_start_idx": int(start_idx),
+                "orig_end_idx": int(end_idx),
+            }
+            state_writer.append_episode_meta(ep_meta)
+
         # Replay trajectory using stored actions
-        all_states = []
         all_images = []  # Store images for GIF generation
         images_saved = 0
         states_saved = 0
-        
+
+        # Helper: extract and append current simulator state to writer
+        def _append_current_state_to_writer():
+            if state_writer is None:
+                return
+            # Access underlying BDDL env
+            bddl_env = env.env if hasattr(env, "env") else env
+            sim = bddl_env.sim
+
+            # Core robot / eef
+            robot_qpos = np.asarray(sim.data.qpos[:7], dtype=np.float32)
+            robot_qvel = np.asarray(sim.data.qvel[:7], dtype=np.float32)
+            # EE position and quaternion (robust site/body lookup)
+            ee_pos = None
+            for site_name in ["gripper0_grip_site", "grip_site", "eef_site", "gripper_site"]:
+                try:
+                    sid = sim.model.site_name2id(site_name)
+                    ee_pos = sim.data.site_xpos[sid].copy()
+                    break
+                except Exception:
+                    continue
+            if ee_pos is None:
+                ee_pos = np.zeros(3, dtype=np.float32)
+            ee_quat = None
+            for body_name in ["gripper0_eef", "eef", "gripper_eef", "gripper"]:
+                try:
+                    ee_quat = sim.data.get_body_xquat(body_name).copy()
+                    break
+                except Exception:
+                    continue
+            if ee_quat is None:
+                ee_quat = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+
+            state_writer.append_core(robot_qpos, robot_qvel, ee_pos, ee_quat, float(sim.data.time))
+
+            # Object states (use LIBERO object_states_dict order sorted by name)
+            obj_states = getattr(bddl_env, "object_states_dict", {})
+            names = sorted(list(obj_states.keys()))
+            positions = []
+            orientations = []
+            body_ids = []
+            extents = []
+            for name in names:
+                st = obj_states[name]
+                geom = st.get_geom_state()
+                positions.append(np.asarray(geom.get("pos", np.zeros(3)), dtype=np.float32))
+                orientations.append(np.asarray(geom.get("quat", np.array([0, 0, 0, 1])), dtype=np.float32))
+                # Body id if exists
+                bid = -1
+                try:
+                    bid = int(bddl_env.obj_body_id.get(name, -1))
+                except Exception:
+                    bid = -1
+                body_ids.append(bid)
+                extents.append(0.0)  # placeholder; true extents not required for LIBERO-native checks
+            positions = np.stack(positions, axis=0) if positions else np.zeros((0, 3), dtype=np.float32)
+            orientations = np.stack(orientations, axis=0) if orientations else np.zeros((0, 4), dtype=np.float32)
+            state_writer.set_task_objects_metadata(task_name, names, np.asarray(body_ids, dtype=np.int32), np.asarray(extents, dtype=np.float32))
+            state_writer.append_task_objects(task_name, positions, orientations)
+
+            # Contacts from MuJoCo
+            ncon = int(sim.data.ncon)
+            b1_ids = []
+            b2_ids = []
+            cpos = []
+            cdist = []
+            for i in range(ncon):
+                c = sim.data.contact[i]
+                try:
+                    bid1 = int(sim.model.geom_bodyid[c.geom1])
+                    bid2 = int(sim.model.geom_bodyid[c.geom2])
+                    b1_ids.append(bid1)
+                    b2_ids.append(bid2)
+                    cpos.append(np.array([c.pos[0], c.pos[1], c.pos[2]], dtype=np.float32))
+                    cdist.append(float(c.dist))
+                except Exception:
+                    continue
+            if b1_ids:
+                state_writer.append_contacts(task_name,
+                                             np.asarray(b1_ids, dtype=np.int32),
+                                             np.asarray(b2_ids, dtype=np.int32),
+                                             np.stack(cpos, axis=0),
+                                             np.asarray(cdist, dtype=np.float32))
+
         for timestep in range(num_timesteps):
             if timestep == 0:
                 # First timestep - environment is already reset and initialized above
@@ -436,19 +594,21 @@ def reconstruct_trajectory_episode(
                 # Skip rendering but count what would have been saved
                 images_saved += 1
             
-            # Accumulate simulator state (will save to HDF5 later)
-            if states_output_dir:
-                sim_state = extract_simulator_state(env)
-                sim_state['timestep'] = timestep
-                sim_state['stored_action'] = stored_actions[timestep-1] if timestep > 0 else np.zeros(7)
-                all_states.append(sim_state)
+            # Append simulator state to chunk writer
+            if state_writer is not None:
+                _append_current_state_to_writer()
                 states_saved += 1
+
+            # Accumulate concepts
+            if concepts_recorder is not None:
+                _, snapshot = accumulate_relations_over_time(env, concepts_recorder)
+                episode_concept_snapshots.append(snapshot)
                 
             if timestep % 5 == 0:
                 print(f"[debug-recon] Processed timestep {timestep}/{num_timesteps}")
         
-        # Generate GIF from collected images
-        if images_output_dir and enable_rendering and all_images:
+        # Generate trajectory.gif only if not co-rendering concepts
+        if images_output_dir and enable_rendering and all_images and not render_concepts:
             try:
                 gif_path = episode_img_dir / "trajectory.gif"
                 
@@ -470,43 +630,44 @@ def reconstruct_trajectory_episode(
             except Exception as e:
                 print(f"[debug-recon] WARNING: Could not generate GIF: {e}")
         
-        # Save states to HDF5 after collecting all timesteps (using same pattern as data collection)
-        if states_output_dir and all_states:
-            states_h5_path = episode_state_dir / "states.h5"
-            
-            # HDF5 compression settings (same as data collection)
-            compression_kwargs = {
-                'compression': 'gzip',
-                'compression_opts': 6,
-                'shuffle': True
-            }
-            
-            with h5py.File(states_h5_path, 'w') as f:
-                # Stack each state field across timesteps (same pattern as trajectory collector)
-                for key in all_states[0].keys():
-                    if key == 'error':  # Skip error strings
-                        continue
-                    
-                    # Stack tensors across timesteps
-                    stacked_data = []
-                    for state in all_states:
-                        if key in state:
-                            stacked_data.append(state[key])
-                    
-                    if stacked_data:
-                        try:
-                            # Stack to create [timesteps, ...] arrays
-                            if key in ['object_names']:  # String arrays need special handling
-                                stacked_array = np.array(stacked_data, dtype='S64')
-                            else:
-                                stacked_array = np.stack(stacked_data, axis=0)
-                            
-                            f.create_dataset(key, data=stacked_array, **compression_kwargs)
-                        except Exception as e:
-                            print(f"[debug-recon] WARNING: Could not stack {key}: {e}")
-            
-            print(f"[debug-recon] Saved {len(all_states)} states to HDF5: {states_h5_path}")
+        # Concepts are saved per task at the end by the caller (after all episodes)
         
+        # Optionally render a combined action+concepts GIF strictly aligned by timestep
+        if images_output_dir and enable_rendering and render_concepts and all_images and episode_concept_snapshots:
+            try:
+                concept_names = concepts_recorder.concepts if concepts_recorder is not None else []
+                # Strict alignment: both lists were appended within the same timestep loop
+                T_img = len(all_images)
+                T_con = len(episode_concept_snapshots)
+                if T_img != T_con:
+                    print(f"[warn] image frames ({T_img}) != concept snapshots ({T_con}); enforcing strict alignment by trimming to min")
+                T = min(T_img, T_con)
+                if concept_names:
+                    mat = np.zeros((len(concept_names), T), dtype=np.int8)
+                    for t in range(T):
+                        snap = episode_concept_snapshots[t]
+                        for i, cname in enumerate(concept_names):
+                            mat[i, t] = int(snap.get(cname, 0))
+                    keep_idx = list(range(len(concept_names)))
+                    if concepts_only_changing:
+                        keep_idx = [i for i in range(len(concept_names)) if np.any(mat[i, :] != mat[i, 0])]
+                        if not keep_idx:
+                            keep_idx = list(range(len(concept_names)))
+                    kept_names = [concept_names[i] for i in keep_idx]
+                    kept_mat = mat[keep_idx, :]
+                    # Render with external utils to avoid text distortion
+                    from vla_scripts.concepts_render_utils import render_concept_frames, compose_action_concepts
+                    concept_frames = render_concept_frames(kept_names, kept_mat, width=600)
+                    action_frames = [Image.fromarray(a) if isinstance(a, np.ndarray) else a for a in all_images[:T]]
+                    combined = compose_action_concepts(action_frames, concept_frames, left_width=700, right_width=600)
+                    episode_img_dir = Path(images_output_dir) / f"task_{task_id}" / f"episode_{episode_id}"
+                    episode_img_dir.mkdir(parents=True, exist_ok=True)
+                    out_path = episode_img_dir / "combined.gif"
+                    combined[0].save(out_path, save_all=True, append_images=combined[1:], duration=100, loop=0)
+                    print(f"[debug-recon] Saved combined action+concepts GIF: {out_path}")
+            except Exception as e:
+                print(f"[debug-recon] WARNING: Failed to render combined GIF: {e}")
+
         print(f"[debug-recon] Successfully reconstructed {task_id}/{episode_id}")
         print(f"[debug-recon] Images saved: {images_saved}, States saved: {states_saved}")
         
@@ -520,6 +681,43 @@ def reconstruct_trajectory_episode(
     }
 
 
+def _render_concept_frames_inline(concepts: List[str], values: np.ndarray, width: int = 500) -> List[Image.Image]:
+    """Render text panels for concept values over time.
+
+    Args:
+        concepts: list of concept names, length N
+        values: array of shape [N, T] with 0/1 ints
+        width: panel width in pixels
+
+    Returns:
+        List of PIL Images, one per timestep (length T)
+    """
+    if values.size == 0:
+        return []
+    rows = len(concepts)
+    row_h = 22
+    pad = 12
+    height = pad * 2 + rows * row_h
+    try:
+        font = ImageFont.truetype("DejaVuSansMono.ttf", 16)
+    except Exception:
+        font = ImageFont.load_default()
+    frames: List[Image.Image] = []
+    T = values.shape[1]
+    for t in range(T):
+        img = Image.new("RGB", (width, height), color=(20, 20, 20))
+        draw = ImageDraw.Draw(img)
+        y = pad
+        for i, name in enumerate(concepts):
+            val = int(values[i, t])
+            color = (0, 200, 0) if val == 1 else (200, 0, 0)
+            draw.text((pad, y), name, fill=(220, 220, 220), font=font)
+            draw.text((width - 60, y), "1" if val == 1 else "0", fill=color, font=font)
+            y += row_h
+        frames.append(img)
+    return frames
+
+
 def reconstruct_dataset(
     dataset_dir: str,
     images_output_dir: str = None,
@@ -527,7 +725,10 @@ def reconstruct_dataset(
     task_suite_name: str = "libero_90",
     max_episodes: int = None,
     episode_filter: Dict = None,
-    enable_rendering: bool = True
+    enable_rendering: bool = True,
+    combine_after: bool = True,
+    render_concepts: bool = False,
+    concepts_only_changing: bool = True,
 ):
     """
     Reconstruct all episodes in an optimized trajectory dataset.
@@ -548,13 +749,20 @@ def reconstruct_dataset(
     
     print(f"[debug-recon] Loading optimized dataset: {dataset_dir}")
     print(f"[debug-recon] Images output: {images_output_dir}")
-    print(f"[debug-recon] States output: {states_output_dir}")
+    print(f"[debug-recon] States output root: {states_output_dir or dataset_dir}")
     
     if images_output_dir:
         Path(images_output_dir).mkdir(parents=True, exist_ok=True)
     if states_output_dir:
         Path(states_output_dir).mkdir(parents=True, exist_ok=True)
     
+    # Prepare state chunk writer and concepts root under the chosen root (dataset_dir by default)
+    state_root = str(states_output_dir) if states_output_dir else str(dataset_dir)
+    writer = StateChunkWriter(dataset_root=state_root, process_id=0)
+    paths = resolve_paths(state_root)
+    concepts_root = str(paths["concepts"])  # final save location for per-task CSVs
+    concepts_recorders: Dict[str, CSVRelationsRecorder] = {}
+
     # Load episode metadata once
     episode_metadata = load_episode_metadata(dataset_dir)
     
@@ -591,7 +799,12 @@ def reconstruct_dataset(
                 images_output_dir=images_output_dir,
                 states_output_dir=states_output_dir,
                 episode_metadata=episode_metadata,
-                enable_rendering=enable_rendering
+                enable_rendering=enable_rendering,
+                state_writer=writer,
+                concepts_recorders=concepts_recorders,
+                concepts_root_dir=concepts_root,
+                render_concepts=render_concepts,
+                concepts_only_changing=concepts_only_changing,
             )
             
             total_images += result['images_saved']
@@ -608,6 +821,18 @@ def reconstruct_dataset(
     print(f"[debug-recon] Episodes processed: {episodes_processed}")
     print(f"[debug-recon] Total images saved: {total_images}")
     print(f"[debug-recon] Total states saved: {total_states}")
+
+    # Flush chunk files and optionally combine
+    print(f"[debug-recon] Flushing chunk files...")
+    writer.flush()
+    # Save per-task CSVs named after the task
+    for key, rec in concepts_recorders.items():
+        csv_path = rec.save_as_task_csv(concepts_root)
+        print(f"[debug-recon] Saved task relations CSV: {csv_path}")
+    if combine_after:
+        print(f"[debug-recon] Combining state chunks into final sim_states/...")
+        summary = combine_state_chunks(state_root)
+        print(f"[debug-recon] Combine summary: {summary}")
 
 
 def combine_reconstruction_chunks_to_optimized_format(
@@ -812,6 +1037,9 @@ def main():
     parser.add_argument('--metadata-only', action='store_true', help='Only load and display metadata')
     parser.add_argument('--disable-rendering', action='store_true', help='Disable rendering for efficient state-only reconstruction')
     parser.add_argument('--auto-paths', action='store_true', help='Automatically derive output paths from dataset directory')
+    parser.add_argument('--no-combine', action='store_true', help='Do not combine chunks after reconstruction')
+    parser.add_argument('--render-concepts', action='store_true', help='Co-render concepts next to action frames and save combined.gif')
+    parser.add_argument('--concepts-all', action='store_true', help='Render all concepts (default renders only changing concepts)')
     
     args = parser.parse_args()
     
@@ -852,15 +1080,32 @@ def main():
     
     if args.episode_idx is not None:
         # Reconstruct single episode by index
+        single_writer = StateChunkWriter(dataset_root=(args.states_output_dir or args.dataset_dir), process_id=0)
+        concepts_recorders: Dict[str, CSVRelationsRecorder] = {}
         result = reconstruct_trajectory_episode(
             dataset_dir=args.dataset_dir,
             episode_idx=args.episode_idx,
             task_suite_name=args.task_suite_name,
             images_output_dir=args.images_output_dir,
             states_output_dir=args.states_output_dir,
-            enable_rendering=not args.disable_rendering
+            enable_rendering=not args.disable_rendering,
+            state_writer=single_writer,
+            concepts_recorders=concepts_recorders,
+            concepts_root_dir=str(resolve_paths(args.states_output_dir or args.dataset_dir)["concepts"]),
+            render_concepts=args.render_concepts,
+            concepts_only_changing=(not args.concepts_all),
         )
         print(f"Single episode reconstruction complete: {result}")
+        print("[debug-recon] Flushing chunk files...")
+        single_writer.flush()
+        # Save per-task CSV(s)
+        for key, rec in concepts_recorders.items():
+            csv_path = rec.save_as_task_csv(str(resolve_paths(args.states_output_dir or args.dataset_dir)["concepts"]))
+            print(f"[debug-recon] Saved task relations CSV: {csv_path}")
+        if not args.no_combine:
+            print(f"[debug-recon] Combining state chunks into final sim_states/...")
+            summary = combine_state_chunks(args.states_output_dir or args.dataset_dir)
+            print(f"[debug-recon] Combine summary: {summary}")
     else:
         # Reconstruct dataset
         reconstruct_dataset(
@@ -870,7 +1115,10 @@ def main():
             task_suite_name=args.task_suite_name,
             max_episodes=args.max_episodes,
             episode_filter=episode_filter if episode_filter else None,
-            enable_rendering=not args.disable_rendering
+            enable_rendering=not args.disable_rendering,
+            combine_after=(not args.no_combine),
+            render_concepts=args.render_concepts,
+            concepts_only_changing=(not args.concepts_all),
         )
 
 

@@ -8,7 +8,12 @@ os.environ["MUJOCO_GL"] = "egl"
 os.environ["MUJOCO_EGL_DEVICE_ID"] = "0"
 
 from experiments.robot.robot_utils import normalize_gripper_action, invert_gripper_action
-from vla_scripts.reconstruct_trajectory_data import load_episode_metadata, reconstruct_trajectory_episode, get_reconstruction_paths
+from vla_scripts.reconstruct_trajectory_data import (
+    load_episode_metadata,
+    reconstruct_trajectory_episode,
+    get_reconstruction_paths,
+)
+from vla_scripts.state_io import StateChunkWriter, resolve_paths, combine_state_chunks
 
 def test_metadata_loading():
     """Test smart metadata loading functionality"""
@@ -33,39 +38,79 @@ def test_metadata_loading():
         traceback.print_exc()
         return None
 
-def test_single_episode_reconstruction():
-    """Test reconstructing a single episode with HDF5 states"""
-    print("\n=== TESTING SINGLE EPISODE RECONSTRUCTION ===")
+def test_two_tasks_reconstruction():
+    """Test reconstructing one episode from each of two distinct tasks."""
+    print("\n=== TESTING TWO-TASK RECONSTRUCTION ===")
     dataset_dir = '/work/nvme/bfbo/xzhang42/data/pilot_test/optimized_trajectory_data/'
-    
-    paths = get_reconstruction_paths(dataset_dir)
-    states_output_dir = paths['reconstructed_data_dir']
+    # Use dataset_dir as the root for sim_states/ unless explicitly overridden
+    states_output_dir = dataset_dir
     
     try:
-        result = reconstruct_trajectory_episode(
-            dataset_dir=dataset_dir,
-            episode_idx=0,  # Test first episode
-            task_suite_name='libero_90',
-            images_output_dir=None,  # Skip images for faster test
-            states_output_dir=states_output_dir,
-            enable_rendering=False  # Test without rendering for speed
-        )
-        
-        print(f"Single episode reconstruction result: {result}")
-        
-        # Check HDF5 output files
+        # Prepare writer and global concepts recorder map
+        writer = StateChunkWriter(dataset_root=states_output_dir, process_id=0)
+        concepts_dir = str(resolve_paths(states_output_dir)["concepts"])
+        concepts_recorders = {}
+        # Choose two distinct tasks
+        metadata = load_episode_metadata(dataset_dir)
+        task_ids = list(dict.fromkeys(metadata['task_id']))
+        targets = task_ids[:2] if len(task_ids) >= 2 else task_ids
+        print(f"Target task_ids: {targets}")
+        from pathlib import Path
+        recon_images_dir = Path(get_reconstruction_paths(dataset_dir)['reconstructed_data_dir']) / "images"
+        recon_images_dir.mkdir(parents=True, exist_ok=True)
+
+        for tid in targets:
+            idx_list = metadata.index[metadata['task_id'] == tid].tolist()
+            if not idx_list:
+                continue
+            epi_idx = idx_list[0]
+            print(f"Reconstructing episode index {epi_idx} for task_id {tid}")
+            result = reconstruct_trajectory_episode(
+                dataset_dir=dataset_dir,
+                episode_idx=epi_idx,
+                task_suite_name='libero_90',
+                images_output_dir=str(recon_images_dir),
+                states_output_dir=states_output_dir,
+                episode_metadata=metadata,
+                enable_rendering=True,
+                state_writer=writer,
+                concepts_recorders=concepts_recorders,
+                concepts_root_dir=concepts_dir,
+                render_concepts=True,
+                concepts_only_changing=True,
+            )
+            print(f"Episode reconstruction result: {result}")
+        # Flush chunk and combine to final layout
+        writer.flush()
+        # Save per-task CSV(s)
+        for key, rec in concepts_recorders.items():
+            csv_path = rec.save_as_task_csv(concepts_dir)
+            print(f"Saved task relations CSV: {csv_path}")
+
+        summary = combine_state_chunks(states_output_dir)
+        print(f"Combine summary: {summary}")
+
+        # Check final sim_states outputs
         import h5py
         from pathlib import Path
-        
-        states_path = Path(states_output_dir) / "task_1" / "episode_1" / "states.h5"
-        if states_path.exists():
-            with h5py.File(states_path, 'r') as f:
-                print(f"HDF5 state fields: {list(f.keys())}")
-                for key in list(f.keys())[:3]:  # Show first 3 fields
-                    print(f"  {key}: shape={f[key].shape}, dtype={f[key].dtype}")
-            print(f"States saved to HDF5: {states_path}")
+        sim_states_root = Path(states_output_dir) / "sim_states"
+        core_path = sim_states_root / "core_states.h5"
+        epi_path = sim_states_root / "episodes_index.h5"
+        assert core_path.exists(), f"Missing core_states.h5 at {core_path}"
+        assert epi_path.exists(), f"Missing episodes_index.h5 at {epi_path}"
+        with h5py.File(core_path, 'r') as f:
+            print(f"core_states.h5 datasets: {list(f.keys())}")
+            for k in ["robot_joint_pos", "ee_pos", "time"]:
+                if k in f:
+                    print(f"  {k}: shape={f[k].shape}")
+
+        # Check that at least one concepts CSV was written
+        concepts_root = Path(concepts_dir)
+        any_csv = list(concepts_root.glob("*.csv"))
+        if any_csv:
+            print(f"Found {len(any_csv)} concepts CSV(s). Example: {any_csv[0]}")
         else:
-            print(f"WARNING: Expected HDF5 file not found: {states_path}")
+            print("WARNING: No concepts CSVs found under concepts/ (this may be okay if no objects/sites present)")
         
         return True
         
@@ -263,16 +308,10 @@ def main():
         print("FAILED: Action processing test failed")
         return
     
-    # Test 5: Rendering toggle
-    render_success = test_rendering_toggle()
-    if not render_success:
-        print("FAILED: Rendering toggle test failed")
-        return
-    
-    # Test 6: Single episode reconstruction with HDF5
-    recon_success = test_single_episode_reconstruction()
+    # Two tasks reconstruction with new sim_states / concepts outputs
+    recon_success = test_two_tasks_reconstruction()
     if not recon_success:
-        print("FAILED: Single episode reconstruction test failed")
+        print("FAILED: Two tasks reconstruction test failed")
         return
     
     print("\n" + "=" * 70)

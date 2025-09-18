@@ -19,6 +19,42 @@ This is the **InSpire** repository - an implementation of Vision-Language-Action
 
 Each experiment includes three baselines: Normal (original data), Randomized pairs (shuffled trajectories), and Noise baseline.
 
+## New: State + Concepts Artifacts (for Probes 3–4)
+
+- sim_states/ (aligned to existing episode_index.h5 indices)
+  - core_states.h5: robot qpos/qvel, ee_pos, ee_quat, time
+  - episodes_index.h5: episode_idx, task_name, language_instruction, task_id, num_timesteps, start_idx/end_idx, task_local_start_idx/end_idx, episode_id
+  - tasks/{task}/object_states.h5: object_positions/orientations and object_names/body_ids/extents
+  - tasks/{task}/contacts_csr.h5: MuJoCo contacts in CSR form (indptr, body ids, pos, dist)
+- concepts/{language_or_task}.csv: one CSV per language instruction (fallback task); rows are scene-specific concepts, columns t0..tN are 0/1 values across processed timesteps.
+- Co-rendered GIFs: images/task_{task_id}/episode_{episode_id}/combined.gif = (action frame | concept panel), strictly synchronized by timestep.
+
+Concept extraction is LIBERO-native (no custom geometry):
+- Uses object_states_dict and predicates (In, On, contact, site contain) to compute: contact(A,B), in(A,B), on(A,B), region_contains(R,A).
+
+## Quick Commands
+
+- Reconstruct dataset, write sim_states/, concepts CSVs, and co-render combined GIFs:
+```bash
+python vla_scripts/reconstruct_trajectory_data.py \
+  /work/nvme/bfbo/xzhang42/data/pilot_test/optimized_trajectory_data \
+  --auto-paths --render-concepts          # add --concepts-all to render all concepts
+```
+
+- Two-task quick test (metadata, two episodes, combined GIFs, merge states):
+```bash
+python test_reconstruction.py
+```
+
+- Standalone concept-render test (no LIBERO; uses dummy frames):
+```bash
+python vla_scripts/test_concepts_render.py
+```
+
+Notes:
+- Combined GIF is written only when --render-concepts is used; otherwise trajectory.gif is produced.
+- Concept CSVs are named by language instruction (fallback task) to avoid collisions.
+
 ### Available Data Types
 
 The system provides complete multi-modal trajectory datasets stored in HDF5 format:
@@ -130,9 +166,12 @@ The system provides complete multi-modal trajectory datasets stored in HDF5 form
 
 ### Data Processing and Loading
 - **vla_scripts/**: Trajectory data collection and loading utilities
-  - `trajectory_data_collector.py`: HDF5-based trajectory data collection system  
+  - `trajectory_data_collector_optimized.py`: HDF5-based optimized collector  
   - `combine_trajectory_files.py`: Combines trajectory data files from multiple parallel processes
-  - `reconstruct_trajectory_data.py`: Image and simulator state reconstruction using stored actions
+  - `reconstruct_trajectory_data.py`: Replays actions, writes sim_states/, concepts CSVs, and (optional) combined GIFs
+  - `visual_concepts_extractor.py`: LIBERO-native relations (contact/in/on/region_contains)
+  - `concepts_render_utils.py`: Helpers to render concept panels and compose side-by-side frames
+  - `test_concepts_render.py`: Standalone renderer test (no LIBERO)
   - Additional data collection and evaluation scripts (production-ready)
 
 ## Development Commands
