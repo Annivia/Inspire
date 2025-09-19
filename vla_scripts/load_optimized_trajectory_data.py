@@ -606,17 +606,67 @@ def get_layer_data_flat(dataset: Dict,
 
 
 def get_actions_data_flat(dataset: Dict,
-                         include_metadata: bool = True) -> Tuple[np.ndarray, Optional[List[Dict]]]:
+                         include_metadata: bool = True,
+                         selection: str = 'first') -> Tuple[np.ndarray, Optional[List[Dict]]]:
     """
     Extract flattened actions data.
     Compatible with original API.
+    
+    Args:
+        dataset: Loaded trajectory dataset dict
+        include_metadata: If True, return per-sample metadata list
+        selection: Which part of the action horizon to return when horizon > 1.
+                   Options:
+                   - 'first' (default): take only the first horizon element
+                   - 'first_middle_last': take first, middle, and last horizon elements
+                   - 'all': take all horizon elements (flattened)
     """
     actions = dataset['actions']
-    
-    # Fix: VQ-BET returns action horizons with shape (N, horizon, action_dim)
-    # We only need the current action (first horizon element)
-    if len(actions.shape) == 3 and actions.shape[1] > 1:
-        actions = actions[:, 0, :]  # Take first horizon element: (N, horizon, action_dim) -> (N, action_dim)
+
+    # Normalize actions according to selection strategy
+    # Supported input shapes:
+    # - (N, horizon)                       -> scalar action per horizon slot
+    # - (N, horizon, action_dim)           -> vector action per horizon slot
+    # - (N, action_dim) or (N,)            -> already single action
+    if selection not in ('first', 'first_middle_last', 'all'):
+        raise ValueError(f"Unsupported selection='{selection}'. Use 'first', 'first_middle_last', or 'all'.")
+
+    if actions.ndim == 3:
+        # (N, horizon, action_dim)
+        N, horizon, action_dim = actions.shape
+        if horizon > 1:
+            if selection == 'first':
+                actions = actions[:, 0, :]  # (N, action_dim)
+            elif selection == 'first_middle_last':
+                mid = horizon // 2
+                idxs = [0, mid, horizon - 1]
+                actions = actions[:, idxs, :]           # (N, 3, action_dim)
+                actions = actions.reshape(N, 3 * action_dim)  # (N, 3*action_dim)
+            elif selection == 'all':
+                actions = actions.reshape(N, horizon * action_dim)  # (N, horizon*action_dim)
+        else:
+            actions = actions.reshape(actions.shape[0], -1)  # (N, action_dim)
+
+    elif actions.ndim == 2:
+        # Could be (N, horizon) or (N, action_dim) depending on dataset
+        N, D = actions.shape
+        if D > 1:
+            # Treat D as horizon when selection applies to horizon tokens
+            if selection == 'first':
+                actions = actions[:, 0:1]  # (N, 1)
+            elif selection == 'first_middle_last':
+                mid = D // 2
+                idxs = [0, mid, D - 1]
+                actions = actions[:, idxs]  # (N, 3)
+            elif selection == 'all':
+                # Keep as-is (N, D)
+                pass
+        else:
+            # (N, 1) already single-action; keep shape
+            pass
+    else:
+        # (N,) -> ensure 2D
+        actions = actions.reshape(actions.shape[0], 1)
     
     if include_metadata:
         # Create metadata for each sample  

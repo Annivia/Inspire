@@ -97,7 +97,10 @@ def run_experiment_1(
     if debug:
         print(f"[DEBUG] Extracting actions data...")
     
-    actions_flat, actions_metadata = get_actions_data_flat(dataset, include_metadata=True)
+    # Use three targets from the action horizon: first, middle, and last
+    actions_flat, actions_metadata = get_actions_data_flat(
+        dataset, include_metadata=True, selection='first_middle_last'
+    )
     
     if len(actions_flat) == 0:
         raise ValueError("No actions data found in dataset")
@@ -133,6 +136,7 @@ def run_experiment_1(
         'config': {
             'layers': layers,
             'generation_steps': generation_steps,
+            'action_selection': 'first_middle_last',
             'successful_only': successful_only,
             'max_episodes': max_episodes,
             'test_size': test_size,
