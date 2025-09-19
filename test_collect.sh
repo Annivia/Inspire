@@ -5,89 +5,16 @@
 
 set -e  # Exit on any error
 
-# Default parameters - Pilot test collection
+# Configuration (edit here if needed; no CLI args required)
 NUM_TASKS=2
-SAVE_DIR=""
-TASK_SUITE="libero_90"
+SAVE_DIR="/work/nvme/bfbo/xzhang42/data/pilot_test"
+# TASK_SUITE="libero_90"
+TASK_SUITE="libero_object"
 NUM_TRIALS_PER_TASK=8  # 2 tasks * 8 trials = 16 trajectories total
 NUM_GPUS=4
 NUM_PROCESSES=16  # Reduced for pilot test
 RECONSTRUCT_IMAGES=false
 RECONSTRUCT_STATES=false
-
-# Usage function
-usage() {
-    echo "Usage: $0 --save-dir DIR [OPTIONS]"
-    echo ""
-    echo "Required arguments:"
-    echo "  --save-dir DIR          Directory to save pilot trajectory data (should be in /work/nvme/...)"
-    echo ""
-    echo "Optional arguments:"
-    echo "  --num-tasks N           Number of LIBERO tasks to collect (default: 2)"
-    echo "  --num-trials TRIALS     Number of trials per task (default: 8)"
-    echo "  --task-suite SUITE      LIBERO task suite (default: libero_90)"
-    echo "  --num-gpus GPUS         Number of GPUs to use (default: 4)"
-    echo "  --num-processes PROCS   Number of processes (default: 16)"
-    echo "  --with-images           Enable image reconstruction"
-    echo "  --with-states           Enable simulator state reconstruction"
-    echo "  --help                  Show this help message"
-    echo ""
-    echo "Examples:"
-    echo "  $0 --save-dir /work/nvme/bfbo/xzhang42/data/pilot_test"
-    echo "  $0 --save-dir /work/nvme/bfbo/xzhang42/data/test --num-tasks 1 --num-trials 16"
-    exit 1
-}
-
-# Parse command line arguments
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --save-dir)
-            SAVE_DIR="$2"
-            shift 2
-            ;;
-        --num-tasks)
-            NUM_TASKS="$2"
-            shift 2
-            ;;
-        --task-suite)
-            TASK_SUITE="$2"
-            shift 2
-            ;;
-        --num-trials)
-            NUM_TRIALS_PER_TASK="$2"
-            shift 2
-            ;;
-        --num-gpus)
-            NUM_GPUS="$2"
-            shift 2
-            ;;
-        --num-processes)
-            NUM_PROCESSES="$2"
-            shift 2
-            ;;
-        --with-images)
-            RECONSTRUCT_IMAGES=true
-            shift
-            ;;
-        --with-states)
-            RECONSTRUCT_STATES=true
-            shift
-            ;;
-        --help)
-            usage
-            ;;
-        *)
-            echo "Unknown argument: $1"
-            usage
-            ;;
-    esac
-done
-
-# Validate required arguments
-if [[ -z "$SAVE_DIR" ]]; then
-    echo "ERROR: --save-dir is required"
-    usage
-fi
 
 if [[ "$NUM_TASKS" -lt 1 || "$NUM_TASKS" -gt 90 ]]; then
     echo "ERROR: --num-tasks must be between 1 and 90"
@@ -128,6 +55,11 @@ export PYTHONPATH=/u/xzhang42/Inspire/vq_bet_official:$PYTHONPATH
 export PYTHONPATH=/u/xzhang42/Inspire:$PYTHONPATH
 export PRISMATIC_DATA_ROOT=/work/nvme/bfbo/xzhang42/Inspire
 export HF_HOME=/work/nvme/bfbo/xzhang42/huggingface
+export PYTHONPATH=/u/xzhang42/Inspire/LIBERO:$PYTHONPATH
+export PYTHONPATH=/u/xzhang42/Inspire/vq_bet_official:$PYTHONPATH
+export PYTHONPATH=/u/xzhang42/Inspire:$PYTHONPATH
+export PRISMATIC_DATA_ROOT=/work/nvme/bfbo/xzhang42/Inspire
+export HF_HOME=/work/nvme/bfbo/xzhang42/huggingface
 
 # Create directories
 mkdir -p "$SAVE_DIR"
@@ -155,6 +87,7 @@ python /u/xzhang42/Inspire/vla_scripts/parallel_libero_evaluator.py \
 }
 
 echo "Pilot data collection completed successfully"
+echo "Concept CSVs saved under: $SAVE_DIR/trajectory_data/concepts/"
 
 echo "=== Step 2: Combining Optimized Pilot Data Files ==="
 echo "Combining chunk files from pilot run into optimized format..."

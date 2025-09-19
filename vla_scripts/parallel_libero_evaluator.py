@@ -27,6 +27,14 @@ from experiments.robot.libero.libero_utils import (
 from utils.logger import Logger, reset_logging
 from utils.visualize import write_video
 
+# Visual concepts and shared path resolution
+from vla_scripts.visual_concepts_extractor import (
+    enumerate_concept_keys,
+    CSVRelationsRecorder,
+    accumulate_relations_over_time,
+)
+from vla_scripts.state_io import resolve_paths
+
 
 def get_image_resize_size(cfg):
     if cfg.model_family == "prismatic":
@@ -306,9 +314,26 @@ class ParallelLiberoEvaluator:
                     process_id=process_idx  # Use process index for unique files
                 )
 
+            # Prepare concept CSV recorders (per process) and output dir
+            concepts_recorders = {}
+            concepts_root = resolve_paths(self.cfg.trajectory_data_save_path)["concepts"]
+            # Use per-process subdir to avoid concurrent writes to same file
+            concepts_root_dir = concepts_root / f"gpu_process_{process_idx}"
+            os.makedirs(concepts_root_dir, exist_ok=True)
+
             for i, (task_id, episode) in enumerate(task_ids_and_episodes):
                 self.logger.info(f"GPU {gpu}: task {task_id} episode {episode}")
-                summary = self.evalute_single(model, task_suite, processor, task_id, episode, show_detail, data_collector)
+                summary = self.evalute_single(
+                    model,
+                    task_suite,
+                    processor,
+                    task_id,
+                    episode,
+                    show_detail,
+                    data_collector,
+                    concepts_recorders,
+                    str(concepts_root_dir),
+                )
                 summaries.append(summary)
             
             # Save accumulated data to temp chunks after all episodes are processed
@@ -316,6 +341,13 @@ class ParallelLiberoEvaluator:
                 print(f"[DEBUG] GPU {gpu}: Saving accumulated data to temp chunks", flush=True)
                 data_collector.save_chunk_to_temp()
                 print(f"[DEBUG] GPU {gpu}: Chunk saving completed", flush=True)
+
+            # Persist per-task concept CSVs for this process
+            if concepts_recorders:
+                print(f"[DEBUG] GPU {gpu}: Writing concept CSVs to {concepts_root_dir}", flush=True)
+                for key, rec in concepts_recorders.items():
+                    csv_path = rec.save_as_task_csv(str(concepts_root_dir))
+                    print(f"[DEBUG] GPU {gpu}: Saved concepts CSV: {csv_path}", flush=True)
             
         except Exception as e:
             print(f"[ERROR] GPU {gpu}: Process failed with error: {str(e)}", flush=True)
@@ -337,7 +369,8 @@ class ParallelLiberoEvaluator:
                 print(f"[ERROR] GPU {gpu}: Failed to write error file: {file_error}", flush=True)
 
 
-    def evalute_single(self, model, task_suite, processor, task_id, episode, show_detail, data_collector=None):
+    def evalute_single(self, model, task_suite, processor, task_id, episode, show_detail,
+                       data_collector=None, concepts_recorders=None, concepts_root_dir=None):
         task = task_suite.get_task(task_id)
         env, task_description = get_libero_env(task, self.cfg.model_family, resolution=self.resize_size)
         env.seed(episode)
@@ -362,10 +395,25 @@ class ParallelLiberoEvaluator:
         else:
             print(f"[EVAL_SINGLE] Data collection not available for task_{task_id}/episode_{episode}")
 
+        # Prepare per-task concepts recorder (shared across episodes in this process)
+        if concepts_recorders is None:
+            concepts_recorders = {}
+        base_name = (task_description or f"task_{task_id}")
+        recorder_key = base_name.lower()
+        if recorder_key not in concepts_recorders:
+            concepts = enumerate_concept_keys(env)
+            rec = CSVRelationsRecorder(task_name=str(task_description), language=str(task_description))
+            if concepts:
+                rec.initialize(concepts)
+            concepts_recorders[recorder_key] = rec
+        rec = concepts_recorders[recorder_key]
+
         while timestep < self.cfg.max_steps + self.cfg.num_steps_wait:
             if timestep < self.cfg.num_steps_wait:
                 obs, reward, done, info = env.step(get_libero_dummy_action(self.cfg.model_family))
                 self._add_observation(obs, replay_images, replay_wrist_images)
+                # Record concepts snapshot each timestep
+                accumulate_relations_over_time(env, rec)
                 timestep += 1
                 continue
 
@@ -400,6 +448,8 @@ class ParallelLiberoEvaluator:
                 for a in action:
                     obs, reward, done, info = env.step(a.tolist())
                     self._add_observation(obs, replay_images, replay_wrist_images)
+                    # Record concepts snapshot after each sub-step
+                    accumulate_relations_over_time(env, rec)
 
                     timestep += 1
                     if show_detail:
@@ -412,6 +462,8 @@ class ParallelLiberoEvaluator:
             else:
                 obs, reward, done, info = env.step(action.tolist())
                 self._add_observation(obs, replay_images, replay_wrist_images)
+                # Record concepts snapshot for this timestep
+                accumulate_relations_over_time(env, rec)
 
                 timestep += 1
                 if show_detail:

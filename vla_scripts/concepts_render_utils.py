@@ -54,8 +54,32 @@ def render_concept_frames(
         for i, name in enumerate(concepts):
             val = int(values[i, t])
             color = on_color if val == 1 else off_color
+            # Draw name
             draw.text((pad, y), name, fill=(220, 220, 220), font=font)
-            draw.text((width - 60, y), "1" if val == 1 else "0", fill=color, font=font)
+            # Draw numeric value immediately after the name for visibility
+            try:
+                # PIL >= 8 provides textbbox for accurate width
+                name_box = draw.textbbox((pad, y), name, font=font)
+                nx = name_box[2] + 8
+            except Exception:
+                # Fallback spacing
+                nx = pad + max(8, len(name) * (font_size // 2))
+            draw.text((nx, y), "1" if val == 1 else "0", fill=color, font=font)
+            # Also draw a colored indicator box on the far right with numeric overlay
+            box_w, box_h = 16, 16
+            bx = max(pad, width - pad - box_w)
+            by = y + max(0, (row_height - box_h) // 2)
+            draw.rectangle([bx, by, bx + box_w, by + box_h], fill=color)
+            # Center the digit '1' or '0' in the box for explicit binary cue
+            digit = "1" if val == 1 else "0"
+            try:
+                tb = draw.textbbox((0, 0), digit, font=font)
+                tw, th = tb[2] - tb[0], tb[3] - tb[1]
+            except Exception:
+                tw, th = (font.size // 2, font.size)
+            tx = bx + (box_w - tw) // 2
+            ty = by + (box_h - th) // 2
+            draw.text((tx, ty), digit, fill=(255, 255, 255), font=font)
             y += row_height
         frames.append(img)
     return frames
@@ -104,4 +128,3 @@ def save_gif(frames: List[Image.Image], out_path: str, duration_ms: int = 100):
     if not frames:
         return
     frames[0].save(out_path, save_all=True, append_images=frames[1:], duration=max(1, int(duration_ms)), loop=0)
-

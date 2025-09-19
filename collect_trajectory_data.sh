@@ -1,30 +1,15 @@
 #!/bin/bash
 set -e
 
-# Defaults
+# Full dataset collection settings (edit here; no CLI args required)
 NUM_TASKS=90
-SAVE_DIR=""
+SAVE_DIR="/work/nvme/bfbo/xzhang42/data/full_run"
 TASK_SUITE="libero_90"
 NUM_TRIALS_PER_TASK=10
 NUM_GPUS=4
 NUM_PROCESSES=32
 RECONSTRUCT_IMAGES=false
 RECONSTRUCT_STATES=false
-
-# Parse args
-while [[ $# -gt 0 ]]; do
-  case $1 in
-    --num-tasks) NUM_TASKS="$2"; shift 2 ;;
-    --save-dir) SAVE_DIR="$2"; shift 2 ;;
-    --task-suite) TASK_SUITE="$2"; shift 2 ;;
-    --num-trials) NUM_TRIALS_PER_TASK="$2"; shift 2 ;;
-    --num-gpus) NUM_GPUS="$2"; shift 2 ;;
-    --num-processes) NUM_PROCESSES="$2"; shift 2 ;;
-    --no-images) RECONSTRUCT_IMAGES=false; shift ;;
-    --no-states) RECONSTRUCT_STATES=false; shift ;;
-    *) shift ;;
-  esac
-done
 
 # Env
 export PYTHONPATH=/u/xzhang42/Inspire/LIBERO:$PYTHONPATH
@@ -46,6 +31,8 @@ python /u/xzhang42/Inspire/vla_scripts/parallel_libero_evaluator.py \
   --collect-trajectory-data \
   --trajectory-data-save-path "$SAVE_DIR/trajectory_data" \
   --save-root "$SAVE_DIR/results"
+
+echo "Concept CSVs saved under: $SAVE_DIR/trajectory_data/concepts/"
 
 echo "=== Step 2 ==="
 python /u/xzhang42/Inspire/vla_scripts/combine_optimized_trajectory_files.py \

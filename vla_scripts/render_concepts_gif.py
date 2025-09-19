@@ -145,8 +145,29 @@ def _render_concepts_frames(concepts: List[str], values: np.ndarray,
         for i, name in enumerate(concepts_f):
             val = int(values_f[i, t])
             color = on_color if val == 1 else off_color
-            draw.text((pad, y), f"{name:}", fill=(220, 220, 220), font=font)
-            draw.text((width - 60, y), "1" if val == 1 else "0", fill=color, font=font)
+            # Name
+            draw.text((pad, y), f"{name}", fill=(220, 220, 220), font=font)
+            # Numeric value right after name
+            try:
+                name_box = draw.textbbox((pad, y), name, font=font)
+                nx = name_box[2] + 8
+            except Exception:
+                nx = pad + max(8, len(name) * 8)
+            draw.text((nx, y), "1" if val == 1 else "0", fill=color, font=font)
+            # Colored indicator box on the far right with numeric overlay
+            box_w, box_h = 16, 16
+            bx = max(pad, width - pad - box_w)
+            by = y + max(0, (row_h - box_h) // 2)
+            draw.rectangle([bx, by, bx + box_w, by + box_h], fill=color)
+            digit = "1" if val == 1 else "0"
+            try:
+                tb = draw.textbbox((0, 0), digit, font=font)
+                tw, th = tb[2] - tb[0], tb[3] - tb[1]
+            except Exception:
+                tw, th = (8, 12)
+            tx = bx + (box_w - tw) // 2
+            ty = by + (box_h - th) // 2
+            draw.text((tx, ty), digit, fill=(255, 255, 255), font=font)
             y += row_h
         frames.append(img)
     return frames
@@ -200,7 +221,7 @@ def main():
         base = Path(IMAGES_ROOT)
         if task_id >= 0 and episode_id >= 0:
             traj_path = base / f"task_{task_id}" / f"episode_{episode_id}" / "trajectory.gif"
-            action_frames = _load_gif_frames(traj_path) if ' _load_gif_frames' in globals() else []
+            action_frames = _load_gif_frames(traj_path)
             if action_frames:
                 dest = traj_path.parent
         if not action_frames:

@@ -1,11 +1,3 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Overview
-
-This is the **InSpire** repository - an implementation of Vision-Language-Action models with intrinsic spatial reasoning for robotics. 
-
 ### Current Development Goal
 
 **PRIORITY: Implement linear probing experiments on optimized trajectory data.** \
