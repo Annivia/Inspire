@@ -88,8 +88,18 @@ Purpose: Map the exact files and functions involved in simulator state access, g
   1) Use `extract_visual_concepts_from_state(sim_state, task_description)` if you already have state dicts.
 
 - Reconstruct from dataset and extract
-  1) Run `vla_scripts/reconstruct_trajectory_data.py` on `/optimized_trajectory_data/` to dump states / images.
-  2) Feed saved `sim_state` entries into `extract_visual_concepts_from_state` for concept vectors.
+  1) Concepts-only replay (no images, no `sim_states/`):
+     ```bash
+     python vla_scripts/reconstruct_trajectory_data.py /path/to/optimized_trajectory_data --disable-rendering
+     ```
+     This replays episodes and writes per-task concept CSVs under `<dataset_or_states_root>/concepts/`.
+
+  2) Replay and also save simulator states (`sim_states/`):
+     ```bash
+     python vla_scripts/reconstruct_trajectory_data.py /path/to/optimized_trajectory_data \
+       --states-output-dir /path/to/reconstructed_states --enable-state-io
+     ```
+     This enables `state_io` and merges chunks into `sim_states/` for offline analysis.
 
 ## Debugging Pointers
 
@@ -113,4 +123,3 @@ Purpose: Map the exact files and functions involved in simulator state access, g
   - `LIBERO/.../envs/predicates/*`: Predicate registry and implementations (symbolic truth evaluation).
   - `LIBERO/.../envs/venv.py`: Vectorized `get_sim_state` wrappers.
   - `LIBERO/.../envs/bddl_utils.py`: BDDL parsing to `initial_state`, `goal_state`, etc.
-

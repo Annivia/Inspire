@@ -729,6 +729,7 @@ def reconstruct_dataset(
     combine_after: bool = True,
     render_concepts: bool = False,
     concepts_only_changing: bool = True,
+    enable_state_io: bool = False,
 ):
     """
     Reconstruct all episodes in an optimized trajectory dataset.
@@ -756,9 +757,9 @@ def reconstruct_dataset(
     if states_output_dir:
         Path(states_output_dir).mkdir(parents=True, exist_ok=True)
     
-    # Prepare state chunk writer and concepts root under the chosen root (dataset_dir by default)
+    # Prepare optional state chunk writer and concepts root (dataset_dir by default)
     state_root = str(states_output_dir) if states_output_dir else str(dataset_dir)
-    writer = StateChunkWriter(dataset_root=state_root, process_id=0)
+    writer = StateChunkWriter(dataset_root=state_root, process_id=0) if enable_state_io else None
     paths = resolve_paths(state_root)
     concepts_root = str(paths["concepts"])  # final save location for per-task CSVs
     concepts_recorders: Dict[str, CSVRelationsRecorder] = {}
@@ -823,13 +824,14 @@ def reconstruct_dataset(
     print(f"[debug-recon] Total states saved: {total_states}")
 
     # Flush chunk files and optionally combine
-    print(f"[debug-recon] Flushing chunk files...")
-    writer.flush()
+    if enable_state_io and writer is not None:
+        print(f"[debug-recon] Flushing chunk files...")
+        writer.flush()
     # Save per-task CSVs named after the task
     for key, rec in concepts_recorders.items():
         csv_path = rec.save_as_task_csv(concepts_root)
         print(f"[debug-recon] Saved task relations CSV: {csv_path}")
-    if combine_after:
+    if enable_state_io and combine_after:
         print(f"[debug-recon] Combining state chunks into final sim_states/...")
         summary = combine_state_chunks(state_root)
         print(f"[debug-recon] Combine summary: {summary}")
@@ -1038,6 +1040,7 @@ def main():
     parser.add_argument('--disable-rendering', action='store_true', help='Disable rendering for efficient state-only reconstruction')
     parser.add_argument('--auto-paths', action='store_true', help='Automatically derive output paths from dataset directory')
     parser.add_argument('--no-combine', action='store_true', help='Do not combine chunks after reconstruction')
+    parser.add_argument('--enable-state-io', action='store_true', help='Enable saving simulator states to sim_states/')
     parser.add_argument('--render-concepts', action='store_true', help='Co-render concepts next to action frames and save combined.gif')
     parser.add_argument('--concepts-all', action='store_true', help='Render all concepts (default renders only changing concepts)')
     
@@ -1062,9 +1065,13 @@ def main():
             args.images_output_dir = reconstruction_paths['reconstructed_data_dir'] + "/images"
             print(f"[auto-paths] Using auto-derived images output: {args.images_output_dir}")
     
-    if not args.images_output_dir and not args.states_output_dir:
-        print("ERROR: Must specify at least one of --images-output-dir or --states-output-dir (or use --metadata-only or --auto-paths)")
-        return
+    # Allow concepts-only mode (no images / no state io) when explicitly desired
+    if not args.images_output_dir and not args.states_output_dir and not args.enable_state_io:
+        if args.disable_rendering:
+            print("[info] Running in concepts-only mode (no images/state outputs).")
+        else:
+            print("ERROR: Must specify at least one of --images-output-dir or --states-output-dir, or enable --disable-rendering for concepts-only, or use --auto-paths")
+            return
     
     # Validate output directories are in fast storage
     for output_dir in [args.images_output_dir, args.states_output_dir]:
@@ -1080,7 +1087,7 @@ def main():
     
     if args.episode_idx is not None:
         # Reconstruct single episode by index
-        single_writer = StateChunkWriter(dataset_root=(args.states_output_dir or args.dataset_dir), process_id=0)
+        single_writer = StateChunkWriter(dataset_root=(args.states_output_dir or args.dataset_dir), process_id=0) if args.enable_state_io else None
         concepts_recorders: Dict[str, CSVRelationsRecorder] = {}
         result = reconstruct_trajectory_episode(
             dataset_dir=args.dataset_dir,
@@ -1096,13 +1103,14 @@ def main():
             concepts_only_changing=(not args.concepts_all),
         )
         print(f"Single episode reconstruction complete: {result}")
-        print("[debug-recon] Flushing chunk files...")
-        single_writer.flush()
+        if args.enable_state_io and single_writer is not None:
+            print("[debug-recon] Flushing chunk files...")
+            single_writer.flush()
         # Save per-task CSV(s)
         for key, rec in concepts_recorders.items():
             csv_path = rec.save_as_task_csv(str(resolve_paths(args.states_output_dir or args.dataset_dir)["concepts"]))
             print(f"[debug-recon] Saved task relations CSV: {csv_path}")
-        if not args.no_combine:
+        if args.enable_state_io and not args.no_combine:
             print(f"[debug-recon] Combining state chunks into final sim_states/...")
             summary = combine_state_chunks(args.states_output_dir or args.dataset_dir)
             print(f"[debug-recon] Combine summary: {summary}")
@@ -1119,6 +1127,7 @@ def main():
             combine_after=(not args.no_combine),
             render_concepts=args.render_concepts,
             concepts_only_changing=(not args.concepts_all),
+            enable_state_io=args.enable_state_io,
         )
 
 
