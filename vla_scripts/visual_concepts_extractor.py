@@ -28,7 +28,7 @@ from __future__ import annotations
 import csv
 import os
 import re
-from typing import Dict, List, Tuple, Iterable, Optional
+from typing import Dict, List, Tuple, Iterable, Optional, Any
 
 
 def _get_bddl_env(env):
@@ -318,6 +318,21 @@ def get_goal_predicates(env) -> List[Tuple[str, int, Tuple[str, ...]]]:
 
 def get_site_parent_name(env, site_name: str) -> Optional[str]:
     """Return the parent object name for a site (region), if available."""
+
+def get_site_parent_map(env) -> Dict[str, str]:
+    """Return mapping from site (region) name to its parent object/fixture name when available."""
+    mapping: Dict[str, str] = {}
+    try:
+        bddl_env = _get_bddl_env(env)
+        site_objs = getattr(bddl_env, "object_sites_dict", {}) or {}
+        for site_name, site_obj in site_objs.items():
+            parent = getattr(site_obj, "parent_name", None)
+            if isinstance(parent, str) and parent:
+                mapping[site_name] = parent
+    except Exception:
+        pass
+    return mapping
+
     try:
         bddl_env = _get_bddl_env(env)
         site_objs = getattr(bddl_env, "object_sites_dict", {}) or {}
@@ -933,3 +948,149 @@ def accumulate_relations_over_time(env, recorder: Optional[CSVRelationsRecorder]
             recorder.initialize(concepts)
         recorder.append(snapshot)
     return concepts, snapshot
+
+
+def derive_involved_from_goals(goals: List[Tuple[str, int, Tuple[str, ...]]],
+                               objects: List[str],
+                               sites: List[str]) -> Tuple[List[str], List[str]]:
+    """Derive involved objects and sites from goal predicate arguments.
+
+    Returns (involved_objects, involved_sites) sorted and deduplicated.
+    """
+    involved_objects: List[str] = []
+    involved_sites: List[str] = []
+    for _, _, args in goals:
+        if len(args) == 1:
+            a = args[0]
+            if a in objects:
+                involved_objects.append(a)
+            if a in sites:
+                involved_sites.append(a)
+        elif len(args) == 2:
+            a, b = args
+            if a in objects:
+                involved_objects.append(a)
+            if a in sites:
+                involved_sites.append(a)
+            if b in objects:
+                involved_objects.append(b)
+            if b in sites:
+                involved_sites.append(b)
+    involved_objects = sorted(list({n for n in involved_objects if n in objects}))
+    involved_sites = sorted(list({n for n in involved_sites if n in sites}))
+    return involved_objects, involved_sites
+
+
+def collect_scene_predicates(env) -> Dict[str, Any]:
+    """Collect a structured snapshot of predicates for the current scene.
+
+    Centralized policy used by data collection:
+    - Goal predicates (from BDDL) first
+    - Involved objects / regions parsed from goals
+    - Required checks per involved obj / site:
+        * SiteObjectState: check_ontop, check_contact
+        * Site geometry: in_box, under (only if language contains 'under'), on_top
+        * Robot contact: mj_contact(obj, robot)
+    - Site-wide checks for all non-'init' sites against overlap objects
+    - Strict MuJoCo contacts:
+        * mj_contact(obj_i, obj_j) for pairs of involved objects
+        * mj_contact(obj, parent(site)) only (no site NA lines; parents only)
+
+    Returns a dict with fields: language, objects, sites, fixtures, predicates,
+    goals (list of {expr, value}), involved_objects, involved_sites, checks (list of {expr, value}).
+    """
+    inv = get_env_inventory(env)
+    objects, sites, fixtures = inv["objects"], inv["sites"], inv["fixtures"]
+    task_name, language = _get_task_identifiers(env)
+    include_under = should_include_under(env)
+    goals = get_goal_predicates(env)
+    involved_objects, involved_sites = derive_involved_from_goals(goals, objects, sites)
+    overlap_objs = expand_overlap_objects(objects, involved_objects) if involved_objects else []
+    parent_map = get_site_parent_map(env)
+    contact_index = build_contact_index(env)
+
+    # Predicate names used in goals
+    pred_names = sorted(list({g[0].split("(", 1)[0] for g in goals})) if goals else []
+
+    out: Dict[str, Any] = {
+        "language": language,
+        "objects": objects,
+        "sites": sites,
+        "fixtures": fixtures,
+        "predicates": pred_names,
+        "goals": [{"expr": g[0], "value": g[1]} for g in goals],
+        "involved_objects": involved_objects,
+        "involved_sites": involved_sites,
+        "checks": [],
+    }
+
+    def add(expr: str, val):
+        if val is None:
+            return
+        out["checks"].append({"expr": expr, "value": int(val)})
+
+    # Robot contacts for involved objects
+    for obj in involved_objects:
+        add(f"contact({obj},gripper)", contact_obj_with_robot(env, obj, contact_index))
+
+    # Per involved site/object pair
+    for site in involved_sites:
+        for obj in involved_objects:
+            sm = evaluate_site_methods(env, site, obj)
+            if "check_ontop" in sm:
+                add(f"ontop({obj},{site})", sm["check_ontop"])
+            if "check_contact" in sm:
+                add(f"contact({obj},{site})", sm["check_contact"])
+            geom = evaluate_site_geometry_methods(env, site, obj)
+            if "in_box" in geom:
+                add(f"in_box({obj},{site})", geom["in_box"])
+            if include_under and ("under" in geom):
+                add(f"under({obj},{site})", geom["under"])
+            if "on_top" in geom:
+                add(f"on_top({obj},{site})", geom["on_top"])
+
+    # All non-init sites vs overlap objects
+    for site in [s for s in sites if "init" not in s.lower()]:
+        # Unary
+        um = evaluate_site_methods(env, site, None)
+        if "is_open" in um:
+            add(f"is_open({site})", um["is_open"])
+        if "is_close" in um:
+            add(f"is_close({site})", um["is_close"])
+        # Binary
+        for obj in overlap_objs:
+            bm = evaluate_site_methods(env, site, obj)
+            if "check_contact" in bm:
+                add(f"contact({obj},{site})", bm["check_contact"])
+            if "check_contain" in bm:
+                add(f"contain({obj},{site})", bm["check_contain"])
+            if "check_ontop" in bm:
+                add(f"ontop({obj},{site})", bm["check_ontop"])
+            geom = evaluate_site_geometry_methods(env, site, obj)
+            if "in_box" in geom:
+                add(f"in_box({obj},{site})", geom["in_box"])
+            if include_under and ("under" in geom):
+                add(f"under({obj},{site})", geom["under"])
+            if "on_top" in geom:
+                add(f"on_top({obj},{site})", geom["on_top"])
+
+    # Strict MuJoCo contacts
+    # Involved object pairs
+    for i in range(len(involved_objects)):
+        for j in range(i + 1, len(involved_objects)):
+            a, b = involved_objects[i], involved_objects[j]
+            add(f"mj_contact({a},{b})", contact_between_bodies(env, a, b, contact_index))
+    # Involved object vs parent(site) only
+    printed_parent = set()
+    for site in involved_sites:
+        parent = parent_map.get(site)
+        if not parent or parent not in (fixtures + objects):
+            continue
+        for obj in involved_objects:
+            key = (obj, parent)
+            if key in printed_parent:
+                continue
+            add(f"mj_contact({obj},{parent}) [parent_of={site}]", contact_between_bodies(env, obj, parent, contact_index))
+            printed_parent.add(key)
+
+    return out

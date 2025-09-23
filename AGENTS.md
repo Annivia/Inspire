@@ -128,11 +128,15 @@ State reconstruction
 cd vla_scripts
 python test_reconstruction.py
 python reconstruct_trajectory_data.py /path/to/optimized_trajectory_data --metadata-only
+# Concepts-only replay (no images, no sim_states):
 python reconstruct_trajectory_data.py /path/to/optimized_trajectory_data \
-  --states-output-dir /path/to/reconstructed_states \
+  --disable-rendering
+# Save concepts and simulator states (enable state IO):
+python reconstruct_trajectory_data.py /path/to/optimized_trajectory_data \
+  --states-output-dir /path/to/reconstructed_states --enable-state-io \
   --filter-success --max-episodes 5
 python reconstruct_trajectory_data.py /path/to/optimized_trajectory_data \
-  --states-output-dir /path/to/reconstructed_states --episode-idx 0
+  --states-output-dir /path/to/reconstructed_states --enable-state-io --episode-idx 0
 ```
 
 HPC / SLURM
@@ -146,4 +150,3 @@ HPC / SLURM
 2) Extract and persist concept vectors for selected episodes.
 3) Implement `probe3.sh` and `probe4.sh` and wire targets.
 4) Tune target definitions for concepts (positions, contacts, relationships) and align with action chunking.
-
