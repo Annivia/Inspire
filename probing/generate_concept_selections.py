@@ -316,47 +316,50 @@ def select_by_category(task_key: str, rel: Dict, chk: Dict) -> Dict[str, str]:
     # General Task 2
     if has_state_change(lang):
         L = lang.lower()
-        # Collect all stateful sites mentioned/available for this task
-        state_sites = [
-            s for s in sites_all
-            if any(k in s.lower() for k in ("drawer", "microwave", "stove", "oven"))
-        ]
-        # If language specifies positions (top/middle/bottom), filter accordingly;
-        # allow multiple sites if multiple are mentioned (e.g., top AND bottom).
-        pos_filters = []
-        for pos in ("top", "middle", "bottom"):
-            if pos in L:
-                pos_filters.append(pos)
-        if pos_filters:
-            selected_sites = [s for s in state_sites if any(p in s.lower() for p in pos_filters)]
-        else:
-            selected_sites = state_sites or ([reg] if reg else [])
+        # Use goal-relevant sites only: prefer index.by_involved_site
+        idx = (chk.get("index") if chk else None) or {}
+        by_involved_site = idx.get("by_involved_site") or {}
+        selected_sites = list(by_involved_site.keys())
 
-        # If nothing obvious from sites list, fall back to any predicates present in hashes
-        # by parsing site names from is_open()/is_close() entries.
+        # If none available, fall back to meta.involved_sites
         if not selected_sites:
-            for name in all_names:
-                if name.startswith("is_open(") or name.startswith("is_close("):
-                    try:
-                        site = name.split("(", 1)[1][:-1]
-                    except Exception:
-                        continue
-                    if site:
-                        selected_sites.append(site)
-            # Deduplicate while preserving order
-            seen = set(); selected_sites = [s for s in selected_sites if not (s in seen or seen.add(s))]
+            selected_sites = list(meta.get("involved_sites") or [])
 
+        # For state predicates, restrict to true region sites (exclude side/surfaces)
+        if selected_sites:
+            selected_sites = [s for s in selected_sites if "region" in s.lower()]
+
+        # If still none, abort this category for this task
         if selected_sites:
             lines = ["General Task 2 (State Change)"]
             want_open = any(k in L for k in ("open", "turn on", "power on"))
             want_close = any(k in L for k in ("close", "shut", "turn off", "power off"))
-            for site in selected_sites:
-                # Include all matching states present in hashes for each relevant site
-                for pred, wanted in (("is_open", want_open), ("is_close", want_close)):
-                    name = f"{pred}({site})"
-                    if (not want_open and not want_close) or wanted:
-                        if name in all_names:
-                            lines.append(f"  - {name} {src_of(name)}")
+
+            # If both verbs present, split sites by positional hints
+            open_sites = list(selected_sites)
+            close_sites = list(selected_sites)
+            if want_open and want_close:
+                def filt(pos):
+                    return [s for s in selected_sites if pos in s.lower()]
+                hinted_open = filt("top")
+                hinted_close = filt("bottom")
+                if hinted_open:
+                    open_sites = hinted_open
+                if hinted_close:
+                    close_sites = hinted_close
+
+            # Emit only predicates tied to involved sites and requested states
+            if want_open:
+                for site in open_sites:
+                    name = f"is_open({site})"
+                    if name in (by_involved_site.get(site) or []):
+                        lines.append(f"  - {name} {src_of(name)}")
+            if want_close:
+                for site in close_sites:
+                    name = f"is_close({site})"
+                    if name in (by_involved_site.get(site) or []):
+                        lines.append(f"  - {name} {src_of(name)}")
+
             if len(lines) > 1:
                 out["g2"].append("\n".join(lines))
 
