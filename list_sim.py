@@ -81,10 +81,17 @@ def process_tasks(tasks, suite_label: str, instr_out_path: Path, print_path: Pat
             lang = snap.get('language') or task_desc or ''
             # Build concept hash tables (relations + checks)
             try:
-                rel_hash = build_concept_hash(env, source="relations")
-                chk_hash = build_concept_hash(env, source="checks")
-                base_name = lang.strip() if isinstance(lang, str) and lang.strip() else task.name
-                base = _sanitize_filename(base_name)
+                # Derive scene name from task.name if present
+                import re as _re
+                full_task_id = str(task.name)
+                m = _re.match(r"^(.*?_SCENE\d+)_", full_task_id)
+                scene_name = m.group(1) if m else ""
+                rel_hash = build_concept_hash(env, source="relations", task_id=full_task_id, scene_name=scene_name)
+                chk_hash = build_concept_hash(env, source="checks", task_id=full_task_id, scene_name=scene_name)
+                # Build a unique base filename using language and scene/task id to avoid collisions across scenes
+                base_lang = _sanitize_filename(lang.strip()) if isinstance(lang, str) and lang and lang.strip() else _sanitize_filename(task.name)
+                base_suffix = _sanitize_filename(scene_name or full_task_id)
+                base = f"{base_lang}__{base_suffix}"
                 rel_path = hash_out_dir / f"{base}__relations_hash.json"
                 chk_path = hash_out_dir / f"{base}__checks_hash.json"
                 with open(rel_path, "w", encoding="utf-8") as f:
