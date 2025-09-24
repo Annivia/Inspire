@@ -7,6 +7,11 @@ allowing perfect reconstruction of both images and simulator states that corresp
 collected hidden states and vision features for probes 3 and 4.
 
 Supports smart metadata-only loading for efficient episode selection.
+
+Defaults simplified for local runs:
+- Dataset directory is set by DEFAULT_DATASET_DIR below (edit in-place as needed).
+- Output paths are auto-derived; CLI path overrides are ignored.
+- Concepts rendering is enabled by default.
 """
 
 import os
@@ -27,6 +32,9 @@ sys.path.append('/u/xzhang42/Inspire')
 sys.path.append('/u/xzhang42/Inspire/LIBERO')
 sys.path.append('/u/xzhang42/Inspire/vq_bet_official')
 
+# Default dataset directory (edit by hand if needed)
+DEFAULT_DATASET_DIR = '/work/nvme/bfbo/xzhang42/data/pilot_test/optimized_trajectory_data/'
+
 from libero.libero import benchmark
 from experiments.robot.libero.libero_utils import get_libero_env, get_libero_image
 from experiments.robot.robot_utils import normalize_gripper_action, invert_gripper_action
@@ -38,7 +46,13 @@ from collections import defaultdict
 from vla_scripts.visual_concepts_extractor import (
     enumerate_concept_keys,
     CSVRelationsRecorder,
-    accumulate_relations_over_time,
+    evaluate_concepts,
+    collect_scene_predicates,
+    evaluate_site_methods,
+    evaluate_site_geometry_methods,
+    contact_obj_with_robot,
+    build_contact_index,
+    contact_between_bodies,
 )
 from vla_scripts.state_io import StateChunkWriter, resolve_paths, combine_state_chunks
 
@@ -406,17 +420,32 @@ def reconstruct_trajectory_episode(
         # Prepare concepts recorder (per-task, persisted across episodes), using LIBERO identifiers
         task_name, language = _get_task_identifiers_from_env(env)
         concepts_recorder = None
+        # Precompute contact index once per episode for fast contact queries
+        contact_index = None
         if concepts_recorders is not None:
             # Key recorders by language instruction to avoid task-name collisions
             key_name = language if language else task_name
             key = _sanitize(key_name)
             if key not in concepts_recorders:
-                # Initialize with concepts enumerated from this scene
-                concepts = enumerate_concept_keys(env)
+                # Decide once per task which predicates to record using the new concept collection logic
+                # Prefer curated checks from collect_scene_predicates; fallback to full enumeration if empty
+                try:
+                    scene_pred = collect_scene_predicates(env) or {}
+                    checks = scene_pred.get("checks") or []
+                    concepts = sorted({c.get("expr") for c in checks if isinstance(c, dict) and c.get("expr")})
+                except Exception:
+                    concepts = []
+                if not concepts:
+                    concepts = enumerate_concept_keys(env)
                 rec = CSVRelationsRecorder(task_name=task_name, language=language)
                 rec.initialize(concepts)
                 concepts_recorders[key] = rec
             concepts_recorder = concepts_recorders[key]
+            # Build once; structure is static across timesteps
+            try:
+                contact_index = build_contact_index(env)
+            except Exception:
+                contact_index = None
         # Per-episode concept snapshots (for combined rendering)
         episode_concept_snapshots: List[Dict[str, int]] = []
 
@@ -601,7 +630,76 @@ def reconstruct_trajectory_episode(
 
             # Accumulate concepts
             if concepts_recorder is not None:
-                _, snapshot = accumulate_relations_over_time(env, concepts_recorder)
+                # Evaluate only the pre-selected concepts for this task and append once per timestep
+                concept_list = concepts_recorder.concepts if concepts_recorder.concepts else enumerate_concept_keys(env)
+
+                def _eval_expr(expr: str) -> int:
+                    try:
+                        base = expr.split(" ", 1)[0]  # strip annotations like " [parent_of=...]"
+                        if not ("(" in base and base.endswith(")")):
+                            return 0
+                        head, rest = base.split("(", 1)
+                        args = [a.strip() for a in rest[:-1].split(",") if a.strip()]
+                        head_l = head.lower()
+                        if head_l == "contact":
+                            # contact(A,B): A may be object, B may be site or gripper
+                            if len(args) != 2:
+                                return 0
+                            a, b = args
+                            if b == "gripper":
+                                return 1 if contact_obj_with_robot(env, a, contact_index) else 0
+                            # If B is a site, use site methods; else fallback to MuJoCo contact
+                            try:
+                                sm = evaluate_site_methods(env, b, a)
+                                if "check_contact" in sm:
+                                    return 1 if sm["check_contact"] else 0
+                            except Exception:
+                                pass
+                            return 1 if contact_between_bodies(env, a, b, contact_index) else 0
+                        if head_l == "ontop":
+                            if len(args) != 2:
+                                return 0
+                            a, site = args
+                            sm = evaluate_site_methods(env, site, a)
+                            return 1 if sm.get("check_ontop") else 0
+                        if head_l == "contain":
+                            if len(args) != 2:
+                                return 0
+                            a, site = args
+                            sm = evaluate_site_methods(env, site, a)
+                            return 1 if sm.get("check_contain") else 0
+                        if head_l in ("in_box", "under", "on_top"):
+                            if len(args) != 2:
+                                return 0
+                            a, site = args
+                            gm = evaluate_site_geometry_methods(env, site, a)
+                            return 1 if gm.get(head_l) else 0
+                        if head_l == "is_open":
+                            if len(args) != 1:
+                                return 0
+                            site = args[0]
+                            um = evaluate_site_methods(env, site, None)
+                            return 1 if um.get("is_open") else 0
+                        if head_l == "is_close":
+                            if len(args) != 1:
+                                return 0
+                            site = args[0]
+                            um = evaluate_site_methods(env, site, None)
+                            return 1 if um.get("is_close") else 0
+                        if head_l == "mj_contact":
+                            if len(args) != 2:
+                                return 0
+                            a, b = args
+                            return 1 if contact_between_bodies(env, a, b, contact_index) else 0
+                        if head_l in ("in", "on"):
+                            # Fall back to generic predicate evaluator
+                            return int(evaluate_concepts(env, [expr]).get(expr, 0))
+                    except Exception:
+                        return 0
+                    return 0
+
+                snapshot = {expr: _eval_expr(expr) for expr in concept_list}
+                concepts_recorder.append(snapshot)
                 episode_concept_snapshots.append(snapshot)
                 
             if timestep % 5 == 0:
@@ -1027,25 +1125,30 @@ def get_reconstruction_paths(dataset_dir: str) -> Dict[str, str]:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Reconstruct trajectory data from optimized dataset')
-    parser.add_argument('dataset_dir', help='Path to optimized trajectory data directory')
+    parser = argparse.ArgumentParser(description='Reconstruct trajectory data from optimized dataset (paths auto-derived)')
+    parser.add_argument('dataset_dir', nargs='?', default=None, help='Path to optimized trajectory data directory (defaults to DEFAULT_DATASET_DIR)')
     parser.add_argument('--task-suite-name', default='libero_90', help='LIBERO task suite name')
-    parser.add_argument('--images-output-dir', help='Output directory for reconstructed images (auto-derived if not specified)')
-    parser.add_argument('--states-output-dir', help='Output directory for simulator states (auto-derived if not specified)')
+    # Path overrides are ignored; outputs are auto-derived from dataset_dir
+    parser.add_argument('--images-output-dir', help='(Ignored) Output directory for reconstructed images – auto-derived')
+    parser.add_argument('--states-output-dir', help='(Ignored) Output directory for simulator states – auto-derived')
     parser.add_argument('--max-episodes', type=int, help='Maximum episodes to process')
     parser.add_argument('--episode-idx', type=int, help='Specific episode index to reconstruct (0-based)')
     parser.add_argument('--filter-success', action='store_true', help='Only process successful episodes')
     parser.add_argument('--filter-task-ids', nargs='+', type=int, help='Only process specific task IDs')
     parser.add_argument('--metadata-only', action='store_true', help='Only load and display metadata')
     parser.add_argument('--disable-rendering', action='store_true', help='Disable rendering for efficient state-only reconstruction')
-    parser.add_argument('--auto-paths', action='store_true', help='Automatically derive output paths from dataset directory')
+    parser.add_argument('--auto-paths', action='store_true', default=True, help='Automatically derive output paths from dataset directory (always on)')
     parser.add_argument('--no-combine', action='store_true', help='Do not combine chunks after reconstruction')
     parser.add_argument('--enable-state-io', action='store_true', help='Enable saving simulator states to sim_states/')
-    parser.add_argument('--render-concepts', action='store_true', help='Co-render concepts next to action frames and save combined.gif')
+    parser.add_argument('--render-concepts', action='store_true', default=True, help='Co-render concepts next to action frames and save combined.gif (default on)')
     parser.add_argument('--concepts-all', action='store_true', help='Render all concepts (default renders only changing concepts)')
     
     args = parser.parse_args()
     
+    # Default dataset dir if not provided
+    if not args.dataset_dir:
+        args.dataset_dir = DEFAULT_DATASET_DIR
+
     # Handle metadata-only mode
     if args.metadata_only:
         episode_metadata = load_episode_metadata(args.dataset_dir)
@@ -1054,24 +1157,19 @@ def main():
         return
     
     # Auto-derive paths if requested or if no output dirs specified
-    if args.auto_paths or (not args.images_output_dir and not args.states_output_dir):
-        reconstruction_paths = get_reconstruction_paths(args.dataset_dir)
-        
-        if not args.states_output_dir:
-            args.states_output_dir = reconstruction_paths['reconstructed_data_dir']
-            print(f"[auto-paths] Using auto-derived states output: {args.states_output_dir}")
-        
-        if not args.images_output_dir and not args.disable_rendering:
-            args.images_output_dir = reconstruction_paths['reconstructed_data_dir'] + "/images"
-            print(f"[auto-paths] Using auto-derived images output: {args.images_output_dir}")
+    # Force auto-derived paths; ignore CLI overrides
+    reconstruction_paths = get_reconstruction_paths(args.dataset_dir)
+    args.states_output_dir = reconstruction_paths['reconstructed_data_dir']
+    print(f"[auto-paths] Using auto-derived states output: {args.states_output_dir}")
+    if not args.disable_rendering:
+        args.images_output_dir = reconstruction_paths['reconstructed_data_dir'] + "/images"
+        print(f"[auto-paths] Using auto-derived images output: {args.images_output_dir}")
+    else:
+        args.images_output_dir = None
     
-    # Allow concepts-only mode (no images / no state io) when explicitly desired
+    # Allow concepts-only mode; with fixed auto paths we simply skip images if disabled
     if not args.images_output_dir and not args.states_output_dir and not args.enable_state_io:
-        if args.disable_rendering:
-            print("[info] Running in concepts-only mode (no images/state outputs).")
-        else:
-            print("ERROR: Must specify at least one of --images-output-dir or --states-output-dir, or enable --disable-rendering for concepts-only, or use --auto-paths")
-            return
+        print("[info] Running in concepts-only mode (no images/state outputs).")
     
     # Validate output directories are in fast storage
     for output_dir in [args.images_output_dir, args.states_output_dir]:
