@@ -18,6 +18,7 @@ import os
 import argparse
 import sys
 from pathlib import Path
+import json
 
 # Ensure imports resolve when running from repo root
 REPO_ROOT = Path(__file__).resolve().parent
@@ -43,6 +44,7 @@ from vla_scripts.visual_concepts_extractor import (
     should_include_under,
     collect_scene_predicates,
     expand_overlap_objects,
+    build_concept_hash,
 )
 
 
@@ -52,9 +54,20 @@ def get_tasks(benchmark_name):
     return bm.tasks
 
 
+def _sanitize_filename(s: str) -> str:
+    s = s.strip().lower()
+    import re as _re
+    s = _re.sub(r"\s+", "_", s)
+    s = _re.sub(r"[^a-z0-9_\-]+", "", s)
+    return s or "task"
+
+
 def process_tasks(tasks, suite_label: str, instr_out_path: Path, print_path: Path):
     print(f"===== Processing {suite_label} ({len(tasks)} tasks) =====")
     all_print_lines = []
+    # Where we dump concept hash tables
+    hash_out_dir = REPO_ROOT / "test" / "hash"
+    hash_out_dir.mkdir(parents=True, exist_ok=True)
     for idx, task in enumerate(tasks):
         print(f"[{suite_label} {idx+1}/{len(tasks)}] {task.name}")
         env = None
@@ -66,6 +79,20 @@ def process_tasks(tasks, suite_label: str, instr_out_path: Path, print_path: Pat
                 pass
             snap = collect_scene_predicates(env)
             lang = snap.get('language') or task_desc or ''
+            # Build concept hash tables (relations + checks)
+            try:
+                rel_hash = build_concept_hash(env, source="relations")
+                chk_hash = build_concept_hash(env, source="checks")
+                base_name = lang.strip() if isinstance(lang, str) and lang.strip() else task.name
+                base = _sanitize_filename(base_name)
+                rel_path = hash_out_dir / f"{base}__relations_hash.json"
+                chk_path = hash_out_dir / f"{base}__checks_hash.json"
+                with open(rel_path, "w", encoding="utf-8") as f:
+                    json.dump(rel_hash, f, indent=2, ensure_ascii=False)
+                with open(chk_path, "w", encoding="utf-8") as f:
+                    json.dump(chk_hash, f, indent=2, ensure_ascii=False)
+            except Exception as e:
+                print(f"[list_sim] Failed to build/save concept hashes: {e}")
             block = []
             block.append(lang)
             block.append(f"objects: {snap.get('objects', [])}")

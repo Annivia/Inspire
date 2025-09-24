@@ -317,7 +317,17 @@ def get_goal_predicates(env) -> List[Tuple[str, int, Tuple[str, ...]]]:
 
 
 def get_site_parent_name(env, site_name: str) -> Optional[str]:
-    """Return the parent object name for a site (region), if available."""
+    """Return the parent object/fixture name for a site (region), if available."""
+    try:
+        bddl_env = _get_bddl_env(env)
+        site_objs = getattr(bddl_env, "object_sites_dict", {}) or {}
+        site_obj = site_objs.get(site_name, None)
+        if site_obj is None:
+            return None
+        parent = getattr(site_obj, "parent_name", None)
+        return parent if isinstance(parent, str) else None
+    except Exception:
+        return None
 
 def get_site_parent_map(env) -> Dict[str, str]:
     """Return mapping from site (region) name to its parent object/fixture name when available."""
@@ -332,16 +342,6 @@ def get_site_parent_map(env) -> Dict[str, str]:
     except Exception:
         pass
     return mapping
-
-    try:
-        bddl_env = _get_bddl_env(env)
-        site_objs = getattr(bddl_env, "object_sites_dict", {}) or {}
-        site_obj = site_objs.get(site_name, None)
-        if site_obj is None:
-            return None
-        return getattr(site_obj, "parent_name", None)
-    except Exception:
-        return None
 
 
 def _get_robot_body_ids(bddl_env) -> Optional[set]:
@@ -1094,3 +1094,251 @@ def collect_scene_predicates(env) -> Dict[str, Any]:
             printed_parent.add(key)
 
     return out
+
+
+def build_concept_hash(
+    env,
+    concepts: Optional[List[str]] = None,
+    source: str = "relations",
+) -> Dict[str, Any]:
+    """Build a filterable concept hash table for the current scene.
+
+    Produces a dictionary mapping concept names → attributes and fast-filter indexes.
+
+    Args:
+        env: LIBERO environment (ControlEnv or underlying BDDL env).
+        concepts: Optional explicit list of concept strings to hash. If None,
+            `source` controls which set is generated.
+        source: One of:
+            - "relations": use `enumerate_concept_keys(env)` (CSV column names)
+            - "checks": use expressions collected by `collect_scene_predicates(env)`
+
+    Returns:
+        Dict with keys:
+            - meta: task + scene inventory and involvement sets
+            - concepts: mapping str → per-concept attributes
+              Each concept has a "fields" array; for each argument/entity:
+                {"name": <entity>, "kind": "object"|"site"|"robot", "parent": <parent_or_None>, "involved": <bool>}
+            - index: reverse indexes for fast filtering (by entity/kind/relation/involved)
+    """
+
+    # Scene inventory and helpers
+    object_states = _get_object_states(env)
+    non_site, site = _split_site_vs_non_site(object_states)
+    inv = get_env_inventory(env)
+    objects, sites = inv["objects"], inv["sites"]
+    parent_map = get_site_parent_map(env)
+    task_name, language = _get_task_identifiers(env)
+
+    # Involvement sets derived from BDDL goals
+    goals = get_goal_predicates(env)
+    involved_objects, involved_sites = derive_involved_from_goals(goals, objects, sites)
+
+    # Relevance heuristics (category/variant level), disjoint from involved
+    COLOR_TOKENS = {
+        "white","black","red","blue","green","yellow","brown","pink","gray","grey","purple","orange",
+        "silver","gold","cyan","magenta","beige","tan",
+    }
+    LATERALITY_TOKENS = {"left","right","middle","center","centre"}
+
+    def _is_num(tok: str) -> bool:
+        try:
+            int(tok)
+            return True
+        except Exception:
+            return False
+
+    def _obj_signature(name: str) -> Tuple[str, ...]:
+        toks = _tokenize_name(name)
+        filt = [t for t in toks if t not in COLOR_TOKENS and t not in LATERALITY_TOKENS and not _is_num(t)]
+        # keep order to preserve multiword categories like "paper_towel"
+        return tuple(filt)
+
+    def _site_signature(name: str) -> Tuple[str, ...]:
+        toks = _tokenize_name(name)
+        filt = [t for t in toks if t not in LATERALITY_TOKENS and not _is_num(t)]
+        return tuple(filt)
+
+    involved_obj_sigs = { _obj_signature(o) for o in involved_objects }
+    # Objects relevant to any involved object: share the same object signature, but are different instances
+    relevant_objects = sorted(
+        [o for o in objects
+         if o not in involved_objects and _obj_signature(o) in involved_obj_sigs and o != "gripper"]
+    ) if involved_objects else []
+
+    # Sites relevant to involved sites: siblings with same parent and same role signature (ignoring laterality / numbers)
+    relevant_sites = []
+    if involved_sites:
+        for s in sites:
+            if s in involved_sites:
+                continue
+            p = parent_map.get(s)
+            sig = _site_signature(s)
+            for isite in involved_sites:
+                if parent_map.get(isite) == p and _site_signature(isite) == sig:
+                    relevant_sites.append(s)
+                    break
+        relevant_sites = sorted(list(set(relevant_sites)))
+    else:
+        relevant_sites = []
+
+    # Choose concept list
+    concept_list: List[str]
+    if concepts is not None:
+        concept_list = list(concepts)
+    elif source == "checks":
+        snap = collect_scene_predicates(env)
+        concept_list = [c["expr"] for c in (snap.get("checks") or []) if isinstance(c, dict) and "expr" in c]
+    else:  # default to relations (CSV-compatible)
+        concept_list = enumerate_concept_keys(env)
+
+    # Helper: parse concept string
+    def _parse(concept: str) -> Tuple[str, List[str]]:
+        # strip any annotation suffix like " ... [parent_of=site]"
+        bare = concept.split(" ", 1)[0]
+        if "(" in bare and bare.endswith(")"):
+            head, rest = bare.split("(", 1)
+            args = rest[:-1]
+            arg_list = [a.strip() for a in args.split(",") if a.strip()]
+            return head.strip(), arg_list
+        return bare, []
+
+    # Storage
+    concept_meta: Dict[str, Dict[str, Any]] = {}
+
+    # Indexes
+    idx_by_object: Dict[str, List[str]] = {}
+    idx_by_site: Dict[str, List[str]] = {}
+    idx_by_parent: Dict[str, List[str]] = {}
+    idx_by_relation: Dict[str, List[str]] = {}
+    idx_by_flag: Dict[str, List[str]] = {}
+    idx_by_relation_type: Dict[str, List[str]] = {}
+    idx_by_involved_object: Dict[str, List[str]] = {}
+    idx_by_involved_site: Dict[str, List[str]] = {}
+    
+    def _add(index: Dict[str, List[str]], key: Optional[str], concept_name: str):
+        if not key:
+            return
+        index.setdefault(key, []).append(concept_name)
+
+    def _add_flag(flag_name: str, cond: bool, concept_name: str):
+        if cond:
+            idx_by_flag.setdefault(flag_name, []).append(concept_name)
+
+    for key in concept_list:
+        head, args = _parse(key)
+        head_l = head.lower()
+
+        # Determine involved names
+        arg_set = set(args)
+        concepts_objects = [a for a in args if (a in non_site) or (a == "gripper")]
+        concepts_sites = [a for a in args if a in site]
+        parents = sorted(list({parent_map.get(s) for s in concepts_sites if parent_map.get(s)}))
+
+        # Flags per requested categories
+        is_check_contact = (head_l == "contact")
+        is_mujoco_contact = (head_l == "mj_contact") or (head_l == "contact" and ("gripper" in arg_set))
+        is_on_top = (head_l in ("on", "ontop", "on_top"))
+        is_under = (head_l == "under")
+        is_in = (head_l == "in")
+        is_region_contains = (head_l == "region_contains")
+        is_is_open = (head_l == "is_open")
+        is_is_close = (head_l == "is_close")
+
+        # Relation type labeling
+        if is_is_open or is_is_close:
+            relation_type = "site-attribute"
+        elif "gripper" in arg_set:
+            relation_type = "object-robot"
+        elif concepts_sites and concepts_objects:
+            relation_type = "object-region"
+        elif len(concepts_objects) >= 2:
+            relation_type = "object-object"
+        elif concepts_sites and not concepts_objects:
+            relation_type = "site-site"
+        else:
+            relation_type = "other"
+
+        # Task involvement labels (entity-level)
+        involved_obj_flags = {o: (o in involved_objects) for o in concepts_objects if o != "gripper"}
+        involved_site_flags = {s: (s in involved_sites) for s in concepts_sites}
+
+
+        # Assemble metadata
+        fields = []
+        for a in args:
+            if a == "gripper":
+                fields.append({"name": a, "kind": "robot", "parent": None, "involved": False})
+            elif a in site:
+                fields.append({"name": a, "kind": "site", "parent": parent_map.get(a), "involved": bool(involved_site_flags.get(a, False))})
+            else:
+                fields.append({"name": a, "kind": "object", "parent": None, "involved": bool(involved_obj_flags.get(a, False))})
+        meta = {
+            "name": key,
+            "relation": head_l,
+            "objects": concepts_objects,
+            "sites": concepts_sites,
+            "site_parents": {s: parent_map.get(s) for s in concepts_sites if s in parent_map},
+            "parents": parents,
+            "fields": fields,
+            "flags": {
+                "is_check_contact": bool(is_check_contact),
+                "is_mujoco_contact": bool(is_mujoco_contact),
+                "is_on_top": bool(is_on_top),
+                "is_under": bool(is_under),
+                "is_in": bool(is_in),
+                "is_region_contains": bool(is_region_contains),
+                "is_open": bool(is_is_open),
+                "is_close": bool(is_is_close),
+            },
+            "relation_type": relation_type,
+            "involved_objects": involved_obj_flags,  # per-object boolean
+            "involved_sites": involved_site_flags,   # per-site boolean
+        }
+        concept_meta[key] = meta
+
+        # Populate indexes
+        _add(idx_by_relation, head_l, key)
+        for o in concepts_objects:
+            _add(idx_by_object, o, key)
+            if involved_obj_flags.get(o):
+                _add(idx_by_involved_object, o, key)
+        for s in concepts_sites:
+            _add(idx_by_site, s, key)
+            if involved_site_flags.get(s):
+                _add(idx_by_involved_site, s, key)
+        for p in parents:
+            _add(idx_by_parent, p, key)
+        _add_flag("is_check_contact", is_check_contact, key)
+        _add_flag("is_mujoco_contact", is_mujoco_contact, key)
+        _add_flag("is_on_top", is_on_top, key)
+        _add_flag("is_under", is_under, key)
+        _add_flag("is_in", is_in, key)
+        _add_flag("is_region_contains", is_region_contains, key)
+        _add_flag("is_open", is_is_open, key)
+        _add_flag("is_close", is_is_close, key)
+        _add(idx_by_relation_type, relation_type, key)
+
+    result: Dict[str, Any] = {
+        "meta": {
+            "task_name": task_name,
+            "language_instruction": language,
+            "objects": objects,
+            "sites": sites,
+            "involved_objects": involved_objects,
+            "involved_sites": involved_sites,
+            "source": source,
+        },
+        "concepts": concept_meta,
+        "index": {
+            "by_object": idx_by_object,
+            "by_site": idx_by_site,
+            "by_parent": idx_by_parent,
+            "by_relation": idx_by_relation,
+            "by_flag": idx_by_flag,
+            "by_relation_type": idx_by_relation_type,
+            "by_involved_object": idx_by_involved_object,
+            "by_involved_site": idx_by_involved_site,
+        },
+    }
+    return result
