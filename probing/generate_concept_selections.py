@@ -11,7 +11,7 @@ each task category described by the user.
 import json
 import re
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HASH_DIR = REPO_ROOT / "test" / "hash"
@@ -45,6 +45,16 @@ def load_hashes() -> List[Tuple[str, Dict, Dict]]:
                 chk = {}
         out.append((b, rel, chk))
     return out
+
+
+def make_language_key(s: str) -> str:
+    """Normalize a language string into a key matching hash file basenames.
+
+    This mirrors the filename stems in test/hash (lowercased, non-word -> underscore).
+    """
+    s = s.lower()
+    s = re.sub(r"[\W_]+", "_", s).strip("_")
+    return s
 
 
 def tokenize(s: str) -> List[str]:
@@ -231,7 +241,7 @@ def select_and_dump(task_key: str, rel: Dict, chk: Dict) -> str:
     return "\n".join(blocks)
 
 
-def select_by_category(task_key: str, rel: Dict, chk: Dict) -> Dict[str, str]:
+def select_by_category(task_key: str, rel: Dict, chk: Dict, *, header_extra: Optional[str] = None) -> Dict[str, str]:
     """Return text blocks per category for a single task, keyed by category id.
 
     Keys: g1, g2, s1, s2, s3
@@ -293,7 +303,11 @@ def select_by_category(task_key: str, rel: Dict, chk: Dict) -> Dict[str, str]:
 
     reg = first_or_none(involved_sites) or (choose_primary_region(tgt) if tgt else "")
 
-    header = f"Task: {lang}\nSources: "
+    # Header with optional scene/task info
+    header = f"Task: {lang}\n"
+    if header_extra:
+        header += header_extra.rstrip() + "\n"
+    header += "Sources: "
     srcs = []
     if rel:
         srcs.append(f"{task_key}__relations_hash.json")
@@ -416,15 +430,24 @@ def select_by_category(task_key: str, rel: Dict, chk: Dict) -> Dict[str, str]:
 
 
 def main():
-    hashes = load_hashes()
+    hash_triplets = load_hashes()
+    # Prepare output buckets
     g1_blocks: List[str] = []
     g2_blocks: List[str] = []
     s1_blocks: List[str] = []
     s2_blocks: List[str] = []
     s3_blocks: List[str] = []
 
-    for task_key, rel, chk in hashes:
-        chosen = select_by_category(task_key, rel, chk)
+    # Iterate all hash files; use meta.scene_name and meta.task_id (if present)
+    for task_key, rel, chk in hash_triplets:
+        meta = (rel.get("meta") if rel else None) or (chk.get("meta") if chk else None) or {}
+        scene = str(meta.get("scene_name") or "").strip()
+        task_id = str(meta.get("task_id") or meta.get("task_name") or task_key)
+        header_extra = ""
+        if scene:
+            header_extra += f"Scene: {scene}\n"
+        header_extra += f"TaskID: {task_id}"
+        chosen = select_by_category(task_key, rel, chk, header_extra=header_extra)
         if chosen["g1"]:
             g1_blocks.extend([chosen["g1"], ""]) 
         if chosen["g2"]:

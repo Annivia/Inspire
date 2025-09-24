@@ -1100,6 +1100,9 @@ def build_concept_hash(
     env,
     concepts: Optional[List[str]] = None,
     source: str = "relations",
+    *,
+    task_id: Optional[str] = None,
+    scene_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build a filterable concept hash table for the current scene.
 
@@ -1319,9 +1322,22 @@ def build_concept_hash(
         _add_flag("is_close", is_is_close, key)
         _add(idx_by_relation_type, relation_type, key)
 
+    # Derive scene name if not explicitly provided
+    if scene_name is None:
+        # Prefer ControlEnv/BDDL problem_name if it already encodes scene
+        candidate = task_id or task_name
+        try:
+            import re as _re  # local import to avoid polluting module globals
+            m = _re.match(r"^(.*?_SCENE\d+)_", str(candidate))
+            scene_name = m.group(1) if m else ""
+        except Exception:
+            scene_name = ""
+
     result: Dict[str, Any] = {
         "meta": {
             "task_name": task_name,
+            "task_id": task_id or task_name,
+            "scene_name": scene_name or "",
             "language_instruction": language,
             "objects": objects,
             "sites": sites,
