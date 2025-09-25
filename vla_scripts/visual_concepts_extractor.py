@@ -29,6 +29,17 @@ import csv
 import os
 import re
 from typing import Dict, List, Tuple, Iterable, Optional, Any
+import os as _os
+
+# Debug toggle for contact mapping. Enable by setting VCE_CONTACT_DEBUG=1
+_CONTACT_DEBUG = str(_os.environ.get("VCE_CONTACT_DEBUG", "0")).strip() in ("1", "true", "True")
+
+def _cdbg(msg: str) -> None:
+    if _CONTACT_DEBUG:
+        try:
+            print(f"[VCE:contact] {msg}")
+        except Exception:
+            pass
 
 
 def _get_bddl_env(env):
@@ -345,27 +356,120 @@ def get_site_parent_map(env) -> Dict[str, str]:
 
 
 def _get_robot_body_ids(bddl_env) -> Optional[set]:
-    """Collect all MuJoCo body IDs that belong to the robot via naming prefix.
+    """Collect MuJoCo body IDs for the robot, including gripper bodies.
 
-    Uses robots[0].robot_model.naming_prefix to match body names. Returns None if unavailable.
+    Tries robot and gripper naming prefixes; falls back to heuristic matches for
+    common gripper terms. Returns None if unavailable.
     """
     try:
         sim = getattr(bddl_env, "sim", None)
         robots = getattr(bddl_env, "robots", None)
         if sim is None or robots is None or len(robots) == 0:
             return None
-        pf = getattr(robots[0].robot_model, "naming_prefix", None)
-        if not pf:
-            return None
+        robot_pf = getattr(robots[0].robot_model, "naming_prefix", None)
+        # Try to find an explicit gripper prefix if present
+        gripper_pf = None
+        try:
+            gr = getattr(robots[0], "gripper", None)
+            if gr is not None:
+                gripper_pf = getattr(gr, "naming_prefix", None)
+        except Exception:
+            gripper_pf = None
+
         ids = set()
         nbody = int(sim.model.nbody)
         for i in range(nbody):
             name = sim.model.body_id2name(i) or ""
-            if pf in name:
+            add = False
+            if robot_pf and robot_pf in name:
+                add = True
+            if gripper_pf and gripper_pf in name:
+                add = True
+            # Heuristic match for typical gripper sub-bodies
+            if (not add) and ("gripper" in name or "finger" in name or name.endswith("_eef") or "eef" in name):
+                add = True
+            if add:
                 ids.add(i)
+        _cdbg(f"robot bodies collected: {len(ids)} (robot_pf={robot_pf}, gripper_pf={gripper_pf})")
         return ids if ids else None
     except Exception:
         return None
+
+def _collect_body_subtree(sim, roots: Iterable[int]) -> set:
+    """Return set of body ids in the subtree rooted at the given body ids (inclusive)."""
+    try:
+        roots = {int(r) for r in roots if r is not None and r >= 0}
+        if not roots:
+            return set()
+        parent = getattr(sim.model, "body_parentid", None)
+        nbody = int(sim.model.nbody)
+        if parent is None:
+            # Fallback: if parent array missing, just return roots
+            return set(roots)
+        children = {i: [] for i in range(nbody)}
+        for i in range(nbody):
+            p = int(parent[i])
+            if p >= 0:
+                children[p].append(i)
+        out = set()
+        stack = list(roots)
+        while stack:
+            b = stack.pop()
+            if b in out:
+                continue
+            out.add(b)
+            stack.extend(children.get(b, []))
+        return out
+    except Exception:
+        return set()
+
+def _resolve_name_to_body_roots(bddl_env, name: str) -> List[int]:
+    """Resolve a scene entity name to one or more root body ids.
+
+    Tries env.obj_body_id, then direct body name lookup; for site names, returns
+    the parent body id. Returns an empty list if nothing found.
+    """
+    try:
+        sim = getattr(bddl_env, "sim", None)
+        if sim is None:
+            return []
+        # 1) Direct object/fixture mapping
+        body_map = getattr(bddl_env, "obj_body_id", {}) or {}
+        if name in body_map:
+            bid = int(body_map[name])
+            return [bid]
+        # 2) Site → parent body id
+        try:
+            sid = int(sim.model.site_name2id(name))
+            bid = int(sim.model.site_bodyid[sid])
+            return [bid]
+        except Exception:
+            pass
+        # 3) Raw body name
+        try:
+            bid = int(sim.model.body_name2id(name))
+            return [bid]
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return []
+
+def _resolve_name_to_body_set(bddl_env, name: str) -> set:
+    """Resolve a scene entity name to a set of body ids (including subtree)."""
+    try:
+        sim = getattr(bddl_env, "sim", None)
+        if sim is None:
+            return set()
+        roots = _resolve_name_to_body_roots(bddl_env, name)
+        if not roots:
+            _cdbg(f"name→body: '{name}' not resolved")
+            return set()
+        ids = _collect_body_subtree(sim, roots)
+        _cdbg(f"name→body: '{name}' roots={roots} subtree_size={len(ids)}")
+        return ids
+    except Exception:
+        return set()
 
 
 def build_contact_index(env) -> Optional[set]:
@@ -412,17 +516,18 @@ def contact_obj_with_robot(env, obj_name: str, contact_index: Optional[set] = No
         robot_bodies = _get_robot_body_ids(bddl_env)
         if not robot_bodies:
             return None
-        # Get object body id
-        obj_body_id_map = getattr(bddl_env, "obj_body_id", {})
-        if obj_name not in obj_body_id_map:
+        # Get object body id set (include subtree)
+        obj_bodies = _resolve_name_to_body_set(bddl_env, obj_name)
+        if not obj_bodies:
             return None
-        obj_body_id = int(obj_body_id_map[obj_name])
+        _cdbg(f"check robot contact: obj='{obj_name}' obj_bodies={len(obj_bodies)} robot_bodies={len(robot_bodies)}")
         # Use precomputed index if present, else scan contacts
         if contact_index is not None:
             for rb in robot_bodies:
-                pair = (rb, obj_body_id) if rb < obj_body_id else (obj_body_id, rb)
-                if pair in contact_index:
-                    return 1
+                for ob in obj_bodies:
+                    pair = (rb, ob) if rb < ob else (ob, rb)
+                    if pair in contact_index:
+                        return 1
             return 0
         else:
             ncon = int(getattr(sim.data, "ncon", 0))
@@ -436,7 +541,7 @@ def contact_obj_with_robot(env, obj_name: str, contact_index: Optional[set] = No
                     continue
                 b1 = int(sim.model.geom_bodyid[g1])
                 b2 = int(sim.model.geom_bodyid[g2])
-                if (b1 == obj_body_id and b2 in robot_bodies) or (b2 == obj_body_id and b1 in robot_bodies):
+                if (b1 in obj_bodies and b2 in robot_bodies) or (b2 in obj_bodies and b1 in robot_bodies):
                     return 1
             return 0
     except Exception:
@@ -532,19 +637,22 @@ def evaluate_site_geometry_methods(env, site_name: str, obj_name: str) -> Dict[s
 
 
 def _get_robot_body_ids(bddl_env) -> Optional[set]:
+    """Return MuJoCo body ids that belong to the robot, including gripper bodies.
+
+    Uses the robot model naming_prefix (e.g., 'robot0_') and also includes any
+    bodies whose name contains 'gripper' (e.g., 'gripper0_leftfinger').
+    """
     try:
         sim = getattr(bddl_env, "sim", None)
         robots = getattr(bddl_env, "robots", None)
         if sim is None or robots is None or len(robots) == 0:
             return None
-        pf = getattr(robots[0].robot_model, "naming_prefix", None)
-        if not pf:
-            return None
+        pf = getattr(robots[0].robot_model, "naming_prefix", None) or ""
         ids = set()
         nbody = int(sim.model.nbody)
         for i in range(nbody):
-            name = sim.model.body_id2name(i) or ""
-            if pf in name:
+            name = (sim.model.body_id2name(i) or "").lower()
+            if (pf and pf.lower() in name) or ("gripper" in name):
                 ids.add(i)
         return ids if ids else None
     except Exception:
@@ -636,14 +744,19 @@ def contact_between_bodies(env, name_a: str, name_b: str, contact_index: Optiona
         sim = getattr(bddl_env, "sim", None)
         if sim is None:
             return None
-        body_map = getattr(bddl_env, "obj_body_id", {})
-        if name_a not in body_map or name_b not in body_map:
+        set_a = _resolve_name_to_body_set(bddl_env, name_a)
+        set_b = _resolve_name_to_body_set(bddl_env, name_b)
+        if not set_a or not set_b:
+            _cdbg(f"contact_between_bodies: mapping failed a='{name_a}'|{len(set_a)} b='{name_b}'|{len(set_b)}")
             return None
-        ba = int(body_map[name_a])
-        bb = int(body_map[name_b])
+        _cdbg(f"contact_between_bodies: a='{name_a}' sizeA={len(set_a)} b='{name_b}' sizeB={len(set_b)}")
         if contact_index is not None:
-            pair = (ba, bb) if ba < bb else (bb, ba)
-            return 1 if pair in contact_index else 0
+            for ba in set_a:
+                for bb in set_b:
+                    pair = (ba, bb) if ba < bb else (bb, ba)
+                    if pair in contact_index:
+                        return 1
+            return 0
         else:
             ncon = int(getattr(sim.data, "ncon", 0))
             if ncon <= 0:
@@ -656,7 +769,7 @@ def contact_between_bodies(env, name_a: str, name_b: str, contact_index: Optiona
                     continue
                 b1 = int(sim.model.geom_bodyid[g1])
                 b2 = int(sim.model.geom_bodyid[g2])
-                if (b1 == ba and b2 == bb) or (b1 == bb and b2 == ba):
+                if (b1 in set_a and b2 in set_b) or (b1 in set_b and b2 in set_a):
                     return 1
             return 0
     except Exception:

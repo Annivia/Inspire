@@ -53,6 +53,11 @@ from vla_scripts.visual_concepts_extractor import (
     contact_obj_with_robot,
     build_contact_index,
     contact_between_bodies,
+    get_env_inventory,
+    get_site_parent_map,
+    get_goal_predicates,
+    derive_involved_from_goals,
+    expand_overlap_objects,
 )
 from vla_scripts.state_io import StateChunkWriter, resolve_paths, combine_state_chunks
 
@@ -344,15 +349,15 @@ def reconstruct_trajectory_episode(
     end_idx = int(episode_info['end_idx'])
     task_description = episode_info['task_description']
     
-    print(f"[debug-recon] Reconstructing episode {episode_idx}: task_{task_id}/episode_{episode_id}")
-    print(f"[debug-recon] Data range: samples {start_idx}-{end_idx} ({num_timesteps} timesteps)")
+    # print(f"[debug-recon] Reconstructing episode {episode_idx}: task_{task_id}/episode_{episode_id}")
+    # print(f"[debug-recon] Data range: samples {start_idx}-{end_idx} ({num_timesteps} timesteps)")
     
     # Load stored actions for this episode
     actions_path = dataset_dir / "actions.h5"
     with h5py.File(actions_path, 'r') as f:
         # Extract actions for this episode using index range
         stored_actions = f['actions'][start_idx:end_idx+1]  # Include end_idx
-        print(f"[debug-recon] Loaded stored actions: {stored_actions.shape}")
+        # print(f"[debug-recon] Loaded stored actions: {stored_actions.shape}")
         
         # Fix: VQ-BET returns action horizons with shape (N, horizon, action_dim)
         # We only need the current action (first horizon element)
@@ -372,10 +377,10 @@ def reconstruct_trajectory_episode(
         - Optionally save image/state for each substep (or just the last substep if you want the same frame count as before)
         """
         
-        # Verify we have the right number of actions
-        print(f"[debug-recon] Final actions shape: {stored_actions.shape}")
-        print(f"[debug-recon] Expected timesteps: {num_timesteps}")
-        print(f"[debug-recon] First few actions: {stored_actions[:3] if len(stored_actions) > 0 else 'None'}")
+        # # Verify we have the right number of actions
+        # print(f"[debug-recon] Final actions shape: {stored_actions.shape}")
+        # print(f"[debug-recon] Expected timesteps: {num_timesteps}")
+        # print(f"[debug-recon] First few actions: {stored_actions[:3] if len(stored_actions) > 0 else 'None'}")
         
         if stored_actions.shape[0] != num_timesteps:
             print(f"[debug-recon] WARNING: Action count mismatch - expected {num_timesteps}, got {stored_actions.shape[0]}")
@@ -411,6 +416,34 @@ def reconstruct_trajectory_episode(
         
         print(f"[debug-recon] Environment initialized - Task: {task_description}")
         print(f"[debug-recon] Reconstruction clues - task:{img_task_id}, episode:{img_episode_id}, seed:{img_env_seed}")
+
+        # Contact setup introspection prints (no fallbacks)
+        try:
+            bddl_env = env.env if hasattr(env, "env") else env
+            sim = getattr(bddl_env, "sim", None)
+            obj_body_id = getattr(bddl_env, "obj_body_id", {})
+            from vla_scripts.visual_concepts_extractor import get_env_inventory, get_site_parent_map, get_goal_predicates, derive_involved_from_goals
+            inv = get_env_inventory(env)
+            objects, sites = inv.get("objects", []), inv.get("sites", [])
+            goals = get_goal_predicates(env)
+            involved_objs, involved_sites = derive_involved_from_goals(goals, objects, sites)
+            parent_map = get_site_parent_map(env)
+            print("[contact-setup] involved_objects:", involved_objs)
+            print("[contact-setup] involved_sites:", involved_sites)
+            print("[contact-setup] site→parent:")
+            for s2 in involved_sites:
+                print(f"  - {s2} → {parent_map.get(s2)}")
+            keys = sorted(list(obj_body_id.keys()))
+            print("[contact-setup] obj_body_id keys (first 20):", keys[:20], ("…" if len(keys) > 20 else ""))
+            robots = getattr(bddl_env, "robots", [])
+            prefix = getattr(robots[0].robot_model, "naming_prefix", None) if robots else None
+            print(f"[contact-setup] robot_prefix={prefix}")
+            if sim is not None:
+                nbody = int(sim.model.nbody)
+                body_names = [sim.model.body_id2name(i) or "" for i in range(nbody)]
+                print("[contact-setup] sample body_names (first 15):", body_names[:15])
+        except Exception as e:
+            print(f"[contact-setup] WARNING: {e}")
         
         # Create output directories
         if images_output_dir:
@@ -433,6 +466,31 @@ def reconstruct_trajectory_episode(
                     scene_pred = collect_scene_predicates(env) or {}
                     checks = scene_pred.get("checks") or []
                     concepts = sorted({c.get("expr") for c in checks if isinstance(c, dict) and c.get("expr")})
+                    # Augment with MJ contacts for objects of interest against parents of their INIT regions
+                    try:
+                        inv = get_env_inventory(env)
+                        objects, sites = inv.get("objects", []), inv.get("sites", [])
+                        parent_map = get_site_parent_map(env)
+                        goals = get_goal_predicates(env)
+                        involved_objs, _ = derive_involved_from_goals(goals, objects, sites)
+                        relevant_objs = expand_overlap_objects(objects, involved_objs) if involved_objs else []
+                        objs_interest = sorted(list({*involved_objs, *relevant_objs})) or involved_objs
+                        extra = []
+                        for obj in objs_interest:
+                            # add mj_contact(obj,gripper)
+                            extra.append(f"mj_contact({obj},gripper)")
+                            # infer init sites for this object (contains object base tokens and 'init')
+                            base = "_".join(obj.split("_")[:-1]) or obj
+                            for s in sites:
+                                sl = s.lower()
+                                if "init" in sl and base in sl:
+                                    parent = parent_map.get(s)
+                                    if parent:
+                                        extra.append(f"mj_contact({obj},{parent})")
+                        if extra:
+                            concepts = sorted(list({*concepts, *extra}))
+                    except Exception:
+                        pass
                 except Exception:
                     concepts = []
                 if not concepts:
@@ -441,6 +499,21 @@ def reconstruct_trajectory_episode(
                 rec.initialize(concepts)
                 concepts_recorders[key] = rec
             concepts_recorder = concepts_recorders[key]
+            # If this episode introduces new concepts (e.g., new mj_contact pairs), merge them
+            try:
+                existing = set(concepts_recorder.concepts)
+                desired = set(concepts)
+                new_items = [c for c in desired if c not in existing]
+                if new_items:
+                    # Extend concept list and backfill prior snapshots with zeros
+                    concepts_recorder.concepts.extend(new_items)
+                    for i in range(len(concepts_recorder.ts)):
+                        for c in new_items:
+                            if c not in concepts_recorder.ts[i]:
+                                concepts_recorder.ts[i][c] = 0
+                    print(f"[debug-recon] concepts: added {len(new_items)} new items for this task")
+            except Exception:
+                pass
             # Build once; structure is static across timesteps
             try:
                 contact_index = build_contact_index(env)
@@ -563,11 +636,7 @@ def reconstruct_trajectory_episode(
                     # Action horizon handling: All actions should be executed
                     horizon_actions = stored_actions[action_idx]  # shape (horizon, 7)
                     
-                    if timestep == 1:
-                        if hasattr(env, 'action_space') and hasattr(env.action_space, 'low'):
-                            print(f"[SCALE-DEBUG] LIBERO action space: low={env.action_space.low}, high={env.action_space.high}")
-                        print(f"[SCALE-DEBUG] Horizon actions shape: {horizon_actions.shape}")
-                        print(f"[SCALE-DEBUG] First horizon action range: {horizon_actions[0][:6] if len(horizon_actions.shape) > 1 else horizon_actions[:6]}")
+                    # removed old SCALE-DEBUG
                     
                     # Execute each action in the horizon
                     if len(horizon_actions.shape) == 2:  # (horizon, 7)
@@ -578,26 +647,22 @@ def reconstruct_trajectory_episode(
                             # Step 2: invert_gripper_action for prismatic (same as line 395-397 in parallel_libero_evaluator.py) 
                             action = invert_gripper_action(action)
                             
-                            if timestep <= 3:  # Only debug first few steps
-                                print(f"[SCALE-DEBUG] Sub-action before processing: {sub_action[:6]}")
-                                print(f"[SCALE-DEBUG] Sub-action after processing: {action[:6]}")
+                            # removed old SCALE-DEBUG prints
                             
                             obs, reward, done, info = env.step(action.tolist())
                             
-                            if timestep <= 3:  # Debug first few steps
-                                print(f"[debug-recon] Sub-step result: reward={reward:.3f}, done={done}")
+                            # if timestep <= 3:  # Debug first few steps
+                                # print(f"[debug-recon] Sub-step result: reward={reward:.3f}, done={done}")
                     else:  # Single action (horizon=1)
                         action = normalize_gripper_action(horizon_actions.copy(), binarize=True)
                         action = invert_gripper_action(action)
                         
-                        if timestep <= 3:  # Only debug first few steps
-                            print(f"[SCALE-DEBUG] Single action before processing: {horizon_actions[:6]}")
-                            print(f"[SCALE-DEBUG] Single action after processing: {action[:6]}")
+                        # removed old SCALE-DEBUG prints
                         
                         obs, reward, done, info = env.step(action.tolist())
                         
-                        if timestep <= 3:  # Debug first few steps
-                            print(f"[debug-recon] Step result: reward={reward:.3f}, done={done}")
+                        # if timestep <= 3:  # Debug first few steps
+                        #     print(f"[debug-recon] Step result: reward={reward:.3f}, done={done}")
                 else:
                     print(f"[debug-recon] ERROR: action_idx {action_idx} >= len(stored_actions) {len(stored_actions)}")
                     break
@@ -632,6 +697,20 @@ def reconstruct_trajectory_episode(
             if concepts_recorder is not None:
                 # Evaluate only the pre-selected concepts for this task and append once per timestep
                 concept_list = concepts_recorder.concepts if concepts_recorder.concepts else enumerate_concept_keys(env)
+                # Recompute contact index at each timestep to reflect live contacts
+                try:
+                    _ci = build_contact_index(env)
+                except Exception:
+                    _ci = None
+
+                # Helper: robust MuJoCo contact between named bodies (objects or fixtures)
+                # Uses extractor's contact_between_bodies which supports body-subtrees
+                def _mj_contact(a_name: str, b_name: str, ci) -> int:
+                    try:
+                        r = contact_between_bodies(env, a_name, b_name, ci)
+                        return int(r) if (r is not None) else 0
+                    except Exception:
+                        return 0
 
                 def _eval_expr(expr: str) -> int:
                     try:
@@ -647,7 +726,7 @@ def reconstruct_trajectory_episode(
                                 return 0
                             a, b = args
                             if b == "gripper":
-                                return 1 if contact_obj_with_robot(env, a, contact_index) else 0
+                                (lambda r: 1 if r==1 else (_robot_contact_scan(_resolve_body_id(a), _ci)))(contact_obj_with_robot(env, a, _ci))
                             # If B is a site, use site methods; else fallback to MuJoCo contact
                             try:
                                 sm = evaluate_site_methods(env, b, a)
@@ -655,7 +734,7 @@ def reconstruct_trajectory_episode(
                                     return 1 if sm["check_contact"] else 0
                             except Exception:
                                 pass
-                            return 1 if contact_between_bodies(env, a, b, contact_index) else 0
+                            return _mj_contact(a, b, _ci)
                         if head_l == "ontop":
                             if len(args) != 2:
                                 return 0
@@ -690,7 +769,15 @@ def reconstruct_trajectory_episode(
                             if len(args) != 2:
                                 return 0
                             a, b = args
-                            return 1 if contact_between_bodies(env, a, b, contact_index) else 0
+                            # Handle gripper using the robot-contact path directly
+                            if a == "gripper" and b != "gripper":
+                                r = contact_obj_with_robot(env, b, _ci)
+                                return 1 if r == 1 else 0
+                            if b == "gripper" and a != "gripper":
+                                r = contact_obj_with_robot(env, a, _ci)
+                                return 1 if r == 1 else 0
+                            # Otherwise, use plain body contact (with subtree handling)
+                            return _mj_contact(a, b, _ci)
                         if head_l in ("in", "on"):
                             # Fall back to generic predicate evaluator
                             return int(evaluate_concepts(env, [expr]).get(expr, 0))
@@ -699,12 +786,197 @@ def reconstruct_trajectory_episode(
                     return 0
 
                 snapshot = {expr: _eval_expr(expr) for expr in concept_list}
+                # Contact debug (t=0, mid, last)
+                if timestep in (0, max(0, num_timesteps//2), num_timesteps - 1):
+                    try:
+                        bddl_env = env.env if hasattr(env, 'env') else env
+                        sim = getattr(bddl_env, 'sim', None)
+                        ncon = int(getattr(sim.data, 'ncon', 0)) if sim is not None else -1
+                        print(f"[contact-debug] t={timestep} ncon={ncon}")
+                        if sim is not None and ncon > 0:
+                            for i in range(min(20, ncon)):
+                                c = sim.data.contact[i]
+                                g1 = int(getattr(c, 'geom1', -1)); g2 = int(getattr(c, 'geom2', -1))
+                                if g1 < 0 or g2 < 0:
+                                    continue
+                                b1 = int(sim.model.geom_bodyid[g1]); b2 = int(sim.model.geom_bodyid[g2])
+                                n1 = sim.model.body_id2name(b1) or ''
+                                n2 = sim.model.body_id2name(b2) or ''
+                                print(f"  [pair] {b1}:{n1} <-> {b2}:{n2}")
+                        # Targeted checks for first involved object and parent of first involved site
+                        from vla_scripts.visual_concepts_extractor import get_env_inventory, get_site_parent_map, get_goal_predicates, derive_involved_from_goals
+                        inv = get_env_inventory(env)
+                        objects, sites = inv.get('objects', []), inv.get('sites', [])
+                        goals = get_goal_predicates(env)
+                        involved_objs, involved_sites = derive_involved_from_goals(goals, objects, sites)
+                        parent_map = get_site_parent_map(env)
+                        target_obj = involved_objs[0] if involved_objs else (objects[0] if objects else '')
+                        parent = ''
+                        if involved_sites:
+                            pref = next((s for s in involved_sites if 'top' in s.lower()), involved_sites[0])
+                            parent = parent_map.get(pref, '')
+                        body_map = getattr(bddl_env, 'obj_body_id', {})
+                        print(f"[contact-debug] target_obj={target_obj} parent_of_site={parent} obj_body_id[target]={body_map.get(target_obj)} obj_body_id[parent]={body_map.get(parent)}")
+                        # Also report initial-site parent for the target object
+                        init_parent=''
+                        try:
+                            from vla_scripts.visual_concepts_extractor import get_env_inventory, get_site_parent_map
+                            inv2 = get_env_inventory(env)
+                            sites2 = inv2.get('sites', [])
+                            pm2 = get_site_parent_map(env)
+                            base = "_".join(target_obj.split("_")[:-1]) or target_obj
+                            for s2 in sites2:
+                                if ('init' in s2.lower()) and (base in s2):
+                                    init_parent = pm2.get(s2, '')
+                                    break
+                        except Exception:
+                            init_parent=''
+                        c_gr = contact_obj_with_robot(env, target_obj, _ci)
+                        c_pa = contact_between_bodies(env, target_obj, parent, _ci) if parent else None
+                        c_init = contact_between_bodies(env, target_obj, init_parent, _ci) if init_parent else None
+                        print(f"[contact-debug] contact_obj_with_robot({target_obj})={c_gr}; contact_between_bodies({target_obj},{parent})={c_pa}; contact_between_bodies({target_obj},{init_parent})={c_init}")
+                    except Exception as e:
+                        print(f"[contact-debug] WARNING: {e}")
                 concepts_recorder.append(snapshot)
                 episode_concept_snapshots.append(snapshot)
                 
             if timestep % 5 == 0:
                 print(f"[debug-recon] Processed timestep {timestep}/{num_timesteps}")
         
+        # Capture final post-action state and concepts once more (after last action)
+        try:
+            if state_writer is not None:
+                _append_current_state_to_writer()
+                states_saved += 1
+            if concepts_recorder is not None:
+                concept_list = concepts_recorder.concepts if concepts_recorder.concepts else enumerate_concept_keys(env)
+                # Recompute contact index for final snapshot
+                try:
+                    _ci_final = build_contact_index(env)
+                except Exception:
+                    _ci_final = None
+                def _mj_contact_final(a_name: str, b_name: str, ci) -> int:
+                    try:
+                        bddl_env = env.env if hasattr(env, 'env') else env
+                        sim = getattr(bddl_env, 'sim', None)
+                        if sim is None:
+                            return 0
+                        body_map = getattr(bddl_env, 'obj_body_id', {})
+                        def get_bid(name: str):
+                            bid = body_map.get(name)
+                            if bid is not None:
+                                return int(bid)
+                            try:
+                                return int(sim.model.body_name2id(name))
+                            except Exception:
+                                return None
+                        ba = get_bid(a_name)
+                        bb = get_bid(b_name)
+                        if ba is None or bb is None:
+                            return 0
+                        if ci is not None:
+                            pair = (ba, bb) if ba < bb else (bb, ba)
+                            return 1 if pair in ci else 0
+                        ncon = int(getattr(sim.data, 'ncon', 0))
+                        for i in range(ncon):
+                            c = sim.data.contact[i]
+                            g1 = int(getattr(c, 'geom1', -1)); g2 = int(getattr(c, 'geom2', -1))
+                            if g1 < 0 or g2 < 0:
+                                continue
+                            b1 = int(sim.model.geom_bodyid[g1]); b2 = int(sim.model.geom_bodyid[g2])
+                            if (b1 == ba and b2 == bb) or (b1 == bb and b2 == ba):
+                                return 1
+                        return 0
+                    except Exception:
+                        return 0
+
+                def _eval_expr_final(expr: str) -> int:
+                    try:
+                        base = expr.split(" ", 1)[0]
+                        if not ("(" in base and base.endswith(")")):
+                            return 0
+                        head, rest = base.split("(", 1)
+                        args = [a.strip() for a in rest[:-1].split(",") if a.strip()]
+                        head_l = head.lower()
+                        if head_l == "contact":
+                            if len(args) != 2:
+                                return 0
+                            a, b = args
+                            if b == "gripper":
+                                return 1 if contact_obj_with_robot(env, a, _ci_final) else 0
+                            try:
+                                sm = evaluate_site_methods(env, b, a)
+                                if "check_contact" in sm:
+                                    return 1 if sm["check_contact"] else 0
+                            except Exception:
+                                pass
+                            return _mj_contact_final(a, b, _ci_final)
+                        if head_l == "ontop":
+                            if len(args) != 2:
+                                return 0
+                            a, site = args
+                            sm = evaluate_site_methods(env, site, a)
+                            return 1 if sm.get("check_ontop") else 0
+                        if head_l == "contain":
+                            if len(args) != 2:
+                                return 0
+                            a, site = args
+                            sm = evaluate_site_methods(env, site, a)
+                            return 1 if sm.get("check_contain") else 0
+                        if head_l in ("in_box", "under", "on_top"):
+                            if len(args) != 2:
+                                return 0
+                            a, site = args
+                            gm = evaluate_site_geometry_methods(env, site, a)
+                            return 1 if gm.get(head_l) else 0
+                        if head_l == "is_open":
+                            if len(args) != 1:
+                                return 0
+                            site = args[0]
+                            um = evaluate_site_methods(env, site, None)
+                            return 1 if um.get("is_open") else 0
+                        if head_l == "is_close":
+                            if len(args) != 1:
+                                return 0
+                            site = args[0]
+                            um = evaluate_site_methods(env, site, None)
+                            return 1 if um.get("is_close") else 0
+                        if head_l == "mj_contact":
+                            if len(args) != 2:
+                                return 0
+                            a, b = args
+                            if a == "gripper" and b != "gripper":
+                                return 1 if contact_obj_with_robot(env, b, _ci_final) else 0
+                            if b == "gripper" and a != "gripper":
+                                return 1 if contact_obj_with_robot(env, a, _ci_final) else 0
+                            return _mj_contact_final(a, b, _ci_final)
+                        if head_l in ("in", "on"):
+                            return int(evaluate_concepts(env, [expr]).get(expr, 0))
+                    except Exception:
+                        return 0
+                    return 0
+                final_snapshot = {expr: _eval_expr_final(expr) for expr in concept_list}
+                # Debug for final mj_contact
+                try:
+                    bddl_env = env.env if hasattr(env, 'env') else env
+                    body_map = getattr(bddl_env, 'obj_body_id', {})
+                    ncon = int(getattr(bddl_env.sim.data, 'ncon', 0)) if hasattr(bddl_env, 'sim') and hasattr(bddl_env.sim, 'data') else -1
+                    mj_items = [(k, v) for k, v in final_snapshot.items() if k.startswith('mj_contact(')]
+                    if mj_items:
+                        print(f"[contact-debug] t=final ncon={ncon} mj_contact_count={len(mj_items)}")
+                        for name, val in mj_items[:10]:
+                            inner = name[len('mj_contact('):-1]
+                            a, b = [s.strip() for s in inner.split(',')]
+                            ba = _resolve_body_id(a)
+                            bb = _resolve_body_id(b)
+                            print(f"[contact-debug]  {name}: {val} (ba={ba}, bb={bb})")
+                except Exception:
+                    pass
+                concepts_recorder.append(final_snapshot)
+                episode_concept_snapshots.append(final_snapshot)
+        except Exception as e:
+            print(f"[warn] Failed to record final post-action snapshot: {e}")
+
         # Generate trajectory.gif only if not co-rendering concepts
         if images_output_dir and enable_rendering and all_images and not render_concepts:
             try:
@@ -746,6 +1018,21 @@ def reconstruct_trajectory_episode(
                         snap = episode_concept_snapshots[t]
                         for i, cname in enumerate(concept_names):
                             mat[i, t] = int(snap.get(cname, 0))
+                    # Optional smoothing to reduce flicker for mj_contact with gripper in visualization
+                    try:
+                        def _is_gripper_contact(name: str) -> bool:
+                            n = name.lower()
+                            return n.startswith('mj_contact(') and ('gripper' in n)
+                        for i, cname in enumerate(concept_names):
+                            if _is_gripper_contact(cname) and T >= 3:
+                                row = mat[i, :].copy()
+                                sm = row.copy()
+                                for t in range(1, T - 1):
+                                    if row[t-1] or row[t] or row[t+1]:
+                                        sm[t] = 1
+                                mat[i, :] = sm
+                    except Exception:
+                        pass
                     keep_idx = list(range(len(concept_names)))
                     if concepts_only_changing:
                         keep_idx = [i for i in range(len(concept_names)) if np.any(mat[i, :] != mat[i, 0])]
@@ -755,7 +1042,15 @@ def reconstruct_trajectory_episode(
                     kept_mat = mat[keep_idx, :]
                     # Render with external utils to avoid text distortion
                     from vla_scripts.concepts_render_utils import render_concept_frames, compose_action_concepts
-                    concept_frames = render_concept_frames(kept_names, kept_mat, width=600)
+                    # Fixed palette: 0=gray, 1=faint red
+                    concept_frames = render_concept_frames(
+                        kept_names,
+                        kept_mat,
+                        width=600,
+                        bg_color=(20,20,20),
+                        off_color=(150,150,150),
+                        on_color=(220,80,80),
+                    )
                     action_frames = [Image.fromarray(a) if isinstance(a, np.ndarray) else a for a in all_images[:T]]
                     combined = compose_action_concepts(action_frames, concept_frames, left_width=700, right_width=600)
                     episode_img_dir = Path(images_output_dir) / f"task_{task_id}" / f"episode_{episode_id}"

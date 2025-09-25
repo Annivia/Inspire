@@ -20,8 +20,8 @@ def render_concept_frames(
     row_height: int = 22,
     pad: int = 12,
     bg_color=(20, 20, 20),
-    on_color=(0, 200, 0),
-    off_color=(200, 0, 0),
+    on_color=(220, 80, 80),   # faint red for 1
+    off_color=(150, 150, 150),# fixed gray for 0
 ) -> List[Image.Image]:
     """Render per-timestep concept panels as a list of PIL Images.
 
