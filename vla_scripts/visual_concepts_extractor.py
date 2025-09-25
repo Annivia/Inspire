@@ -920,6 +920,170 @@ def evaluate_concepts(env, concept_keys: Iterable[str]) -> Dict[str, int]:
     return out
 
 
+def evaluate_concept_expressions(env, expressions: Iterable[str], contact_index: Optional[set] = None) -> Dict[str, int]:
+    """Evaluate heterogeneous concept expressions on the current simulator state.
+
+    Supports heads among: contact, mj_contact, ontop, contain, in_box, under,
+    on_top, is_open, is_close, in, on, region_contains. Unknown heads → 0.
+
+    Notes:
+    - contact(obj,gripper): uses MuJoCo robot contact
+    - contact(obj,site): uses SiteObjectState.check_contact when available; else MuJoCo body contact
+    - ontop/contain: use SiteObjectState methods
+    - in_box/under/on_top: use raw site geometry on SiteObject
+    - is_open/is_close: unary site methods
+    - mj_contact(a,b): strict MuJoCo contact; supports gripper
+    - in/on: delegates to predicate evaluator via evaluate_concepts
+    """
+    out: Dict[str, int] = {}
+    object_states = _get_object_states(env)
+    non_site, site = _split_site_vs_non_site(object_states)
+
+    def _is_site(name: str) -> bool:
+        return name in site
+
+    for expr in expressions:
+        try:
+            base = expr.split(" ", 1)[0]
+            if not ("(" in base and base.endswith(")")):
+                out[expr] = 0
+                continue
+            head, rest = base.split("(", 1)
+            args = [a.strip() for a in rest[:-1].split(",") if a.strip()]
+            head_l = head.lower()
+
+            if head_l == "contact":
+                if len(args) != 2:
+                    out[expr] = 0
+                    continue
+                a, b = args
+                if b == "gripper":
+                    r = contact_obj_with_robot(env, a, contact_index)
+                    out[expr] = 1 if r == 1 else 0
+                    continue
+                if _is_site(b):
+                    sm = evaluate_site_methods(env, b, a)
+                    out[expr] = 1 if sm.get("check_contact") else 0
+                else:
+                    r = contact_between_bodies(env, a, b, contact_index)
+                    out[expr] = int(r) if (r is not None) else 0
+                continue
+
+            if head_l == "ontop":
+                if len(args) == 2:
+                    a, s = args
+                    sm = evaluate_site_methods(env, s, a)
+                    out[expr] = 1 if sm.get("check_ontop") else 0
+                else:
+                    out[expr] = 0
+                continue
+
+            if head_l == "contain":
+                if len(args) == 2:
+                    a, s = args
+                    sm = evaluate_site_methods(env, s, a)
+                    out[expr] = 1 if sm.get("check_contain") else 0
+                else:
+                    out[expr] = 0
+                continue
+
+            if head_l in ("in_box", "under", "on_top"):
+                if len(args) == 2:
+                    a, s = args
+                    gm = evaluate_site_geometry_methods(env, s, a)
+                    out[expr] = 1 if gm.get(head_l) else 0
+                else:
+                    out[expr] = 0
+                continue
+
+            if head_l == "is_open":
+                if len(args) == 1:
+                    s = args[0]
+                    um = evaluate_site_methods(env, s, None)
+                    out[expr] = 1 if um.get("is_open") else 0
+                else:
+                    out[expr] = 0
+                continue
+
+            if head_l == "is_close":
+                if len(args) == 1:
+                    s = args[0]
+                    um = evaluate_site_methods(env, s, None)
+                    out[expr] = 1 if um.get("is_close") else 0
+                else:
+                    out[expr] = 0
+                continue
+
+            if head_l == "mj_contact":
+                if len(args) != 2:
+                    out[expr] = 0
+                    continue
+                a, b = args
+                if a == "gripper" and b != "gripper":
+                    r = contact_obj_with_robot(env, b, contact_index)
+                    out[expr] = 1 if r == 1 else 0
+                    continue
+                if b == "gripper" and a != "gripper":
+                    r = contact_obj_with_robot(env, a, contact_index)
+                    out[expr] = 1 if r == 1 else 0
+                    continue
+                r = contact_between_bodies(env, a, b, contact_index)
+                out[expr] = int(r) if (r is not None) else 0
+                continue
+
+            if head_l in ("in", "on", "region_contains"):
+                out[expr] = int(evaluate_concepts(env, [expr]).get(expr, 0))
+                continue
+
+            out[expr] = 0
+        except Exception:
+            out[expr] = 0
+    return out
+
+
+def select_task_concepts(env) -> List[str]:
+    """Select a per-task concept list for logging/probing.
+
+    Policy:
+    - Prefer curated checks from collect_scene_predicates(env)
+    - Augment with mj_contact(obj,gripper) for involved/relevant objects
+    - Augment with mj_contact(obj,parent_of_init_site_for_obj) when resolvable
+    - If empty, fall back to enumerate_concept_keys(env)
+    """
+    concepts: List[str] = []
+    try:
+        scene_pred = collect_scene_predicates(env) or {}
+        checks = scene_pred.get("checks") or []
+        concepts = sorted({c.get("expr") for c in checks if isinstance(c, dict) and c.get("expr")})
+        try:
+            inv = get_env_inventory(env)
+            objects, sites = inv.get("objects", []), inv.get("sites", [])
+            parent_map = get_site_parent_map(env)
+            goals = get_goal_predicates(env)
+            involved_objs, _ = derive_involved_from_goals(goals, objects, sites)
+            relevant_objs = expand_overlap_objects(objects, involved_objs) if involved_objs else []
+            objs_interest = sorted(list({*involved_objs, *relevant_objs})) or involved_objs
+            extra = []
+            for obj in objs_interest:
+                extra.append(f"mj_contact({obj},gripper)")
+                base = "_".join(obj.split("_")[:-1]) or obj
+                for s in sites:
+                    sl = s.lower()
+                    if "init" in sl and base in sl:
+                        parent = parent_map.get(s)
+                        if parent:
+                            extra.append(f"mj_contact({obj},{parent})")
+            if extra:
+                concepts = sorted(list({*concepts, *extra}))
+        except Exception:
+            pass
+    except Exception:
+        concepts = []
+    if not concepts:
+        concepts = enumerate_concept_keys(env)
+    return concepts
+
+
 class CSVRelationsRecorder:
     """Accumulates time series of concept truth values and writes a per-task CSV.
 

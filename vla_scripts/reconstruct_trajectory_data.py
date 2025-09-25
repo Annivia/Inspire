@@ -58,6 +58,8 @@ from vla_scripts.visual_concepts_extractor import (
     get_goal_predicates,
     derive_involved_from_goals,
     expand_overlap_objects,
+    evaluate_concept_expressions,
+    select_task_concepts,
 )
 from vla_scripts.state_io import StateChunkWriter, resolve_paths, combine_state_chunks
 
@@ -460,49 +462,15 @@ def reconstruct_trajectory_episode(
             key_name = language if language else task_name
             key = _sanitize(key_name)
             if key not in concepts_recorders:
-                # Decide once per task which predicates to record using the new concept collection logic
-                # Prefer curated checks from collect_scene_predicates; fallback to full enumeration if empty
-                try:
-                    scene_pred = collect_scene_predicates(env) or {}
-                    checks = scene_pred.get("checks") or []
-                    concepts = sorted({c.get("expr") for c in checks if isinstance(c, dict) and c.get("expr")})
-                    # Augment with MJ contacts for objects of interest against parents of their INIT regions
-                    try:
-                        inv = get_env_inventory(env)
-                        objects, sites = inv.get("objects", []), inv.get("sites", [])
-                        parent_map = get_site_parent_map(env)
-                        goals = get_goal_predicates(env)
-                        involved_objs, _ = derive_involved_from_goals(goals, objects, sites)
-                        relevant_objs = expand_overlap_objects(objects, involved_objs) if involved_objs else []
-                        objs_interest = sorted(list({*involved_objs, *relevant_objs})) or involved_objs
-                        extra = []
-                        for obj in objs_interest:
-                            # add mj_contact(obj,gripper)
-                            extra.append(f"mj_contact({obj},gripper)")
-                            # infer init sites for this object (contains object base tokens and 'init')
-                            base = "_".join(obj.split("_")[:-1]) or obj
-                            for s in sites:
-                                sl = s.lower()
-                                if "init" in sl and base in sl:
-                                    parent = parent_map.get(s)
-                                    if parent:
-                                        extra.append(f"mj_contact({obj},{parent})")
-                        if extra:
-                            concepts = sorted(list({*concepts, *extra}))
-                    except Exception:
-                        pass
-                except Exception:
-                    concepts = []
-                if not concepts:
-                    concepts = enumerate_concept_keys(env)
+                chosen_concepts = select_task_concepts(env)
                 rec = CSVRelationsRecorder(task_name=task_name, language=language)
-                rec.initialize(concepts)
+                rec.initialize(chosen_concepts)
                 concepts_recorders[key] = rec
             concepts_recorder = concepts_recorders[key]
             # If this episode introduces new concepts (e.g., new mj_contact pairs), merge them
             try:
                 existing = set(concepts_recorder.concepts)
-                desired = set(concepts)
+                desired = set(select_task_concepts(env))
                 new_items = [c for c in desired if c not in existing]
                 if new_items:
                     # Extend concept list and backfill prior snapshots with zeros
@@ -785,7 +753,7 @@ def reconstruct_trajectory_episode(
                         return 0
                     return 0
 
-                snapshot = {expr: _eval_expr(expr) for expr in concept_list}
+                snapshot = evaluate_concept_expressions(env, concept_list, contact_index=_ci)
                 # Contact debug (t=0, mid, last)
                 if timestep in (0, max(0, num_timesteps//2), num_timesteps - 1):
                     try:
@@ -955,7 +923,7 @@ def reconstruct_trajectory_episode(
                     except Exception:
                         return 0
                     return 0
-                final_snapshot = {expr: _eval_expr_final(expr) for expr in concept_list}
+                final_snapshot = evaluate_concept_expressions(env, concept_list, contact_index=_ci_final)
                 # Debug for final mj_contact
                 try:
                     bddl_env = env.env if hasattr(env, 'env') else env
