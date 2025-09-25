@@ -7,7 +7,7 @@ set -e  # Exit on any error
 
 # Configuration (edit here if needed; no CLI args required)
 NUM_TASKS=2
-SAVE_DIR="/work/nvme/bfbo/xzhang42/data/pilot_test"
+SAVE_DIR="/work/nvme/bfbo/xzhang42/data/new_test"
 # TASK_SUITE="libero_90"
 TASK_SUITE="libero_object"
 NUM_TRIALS_PER_TASK=8  # 2 tasks * 8 trials = 16 trajectories total

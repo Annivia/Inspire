@@ -29,9 +29,10 @@ from utils.visualize import write_video
 
 # Visual concepts and shared path resolution
 from vla_scripts.visual_concepts_extractor import (
-    enumerate_concept_keys,
     CSVRelationsRecorder,
-    accumulate_relations_over_time,
+    select_task_concepts,
+    evaluate_concept_expressions,
+    build_contact_index,
 )
 from vla_scripts.state_io import resolve_paths
 
@@ -401,7 +402,7 @@ class ParallelLiberoEvaluator:
         base_name = (task_description or f"task_{task_id}")
         recorder_key = base_name.lower()
         if recorder_key not in concepts_recorders:
-            concepts = enumerate_concept_keys(env)
+            concepts = select_task_concepts(env)
             rec = CSVRelationsRecorder(task_name=str(task_description), language=str(task_description))
             if concepts:
                 rec.initialize(concepts)
@@ -412,8 +413,14 @@ class ParallelLiberoEvaluator:
             if timestep < self.cfg.num_steps_wait:
                 obs, reward, done, info = env.step(get_libero_dummy_action(self.cfg.model_family))
                 self._add_observation(obs, replay_images, replay_wrist_images)
-                # Record concepts snapshot each timestep
-                accumulate_relations_over_time(env, rec)
+                # Record curated concepts snapshot each timestep
+                try:
+                    _ci = build_contact_index(env)
+                except Exception:
+                    _ci = None
+                concept_list = rec.concepts if rec.concepts else select_task_concepts(env)
+                snapshot = evaluate_concept_expressions(env, concept_list, contact_index=_ci)
+                rec.append(snapshot)
                 timestep += 1
                 continue
 
@@ -445,11 +452,18 @@ class ParallelLiberoEvaluator:
                     action = invert_gripper_action(action)
 
             if isinstance(action, list):
+                # Compute contact index once for this environment step and reuse within the chunk
+                try:
+                    _ci_once = build_contact_index(env)
+                except Exception:
+                    _ci_once = None
                 for a in action:
                     obs, reward, done, info = env.step(a.tolist())
                     self._add_observation(obs, replay_images, replay_wrist_images)
-                    # Record concepts snapshot after each sub-step
-                    accumulate_relations_over_time(env, rec)
+                    # Record curated concepts snapshot after each sub-step using cached contact index
+                    concept_list = rec.concepts if rec.concepts else select_task_concepts(env)
+                    snapshot = evaluate_concept_expressions(env, concept_list, contact_index=_ci_once)
+                    rec.append(snapshot)
 
                     timestep += 1
                     if show_detail:
@@ -462,8 +476,14 @@ class ParallelLiberoEvaluator:
             else:
                 obs, reward, done, info = env.step(action.tolist())
                 self._add_observation(obs, replay_images, replay_wrist_images)
-                # Record concepts snapshot for this timestep
-                accumulate_relations_over_time(env, rec)
+                # Record curated concepts snapshot for this timestep
+                try:
+                    _ci = build_contact_index(env)
+                except Exception:
+                    _ci = None
+                concept_list = rec.concepts if rec.concepts else select_task_concepts(env)
+                snapshot = evaluate_concept_expressions(env, concept_list, contact_index=_ci)
+                rec.append(snapshot)
 
                 timestep += 1
                 if show_detail:
