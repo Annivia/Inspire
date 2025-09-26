@@ -67,17 +67,78 @@ def collect_per_dim_r2(results: Dict) -> Tuple[List[float], int]:
     return mean_r2, total_dims
 
 
+def collect_per_dim_r2_by_layer(results: Dict):
+    """
+    Build per-dimension, per-layer R² (averaged over generation steps if multiple).
+    Returns: layers_sorted, total_dims, dim_to_layer_values (dim -> list aligned with layers_sorted)
+    """
+    by_layer = results.get('results_by_layer', {})
+
+    # Gather all layer indices
+    layer_indices = []
+    for layer_key in by_layer.keys():
+        try:
+            layer_indices.append(int(layer_key.split('_')[1]))
+        except Exception:
+            continue
+    layers_sorted = sorted(set(layer_indices))
+
+    # Determine total dims from any entry
+    total_dims = None
+    for layer_key, layer_data in by_layer.items():
+        for gen_key, probe_data in layer_data.items():
+            normal = probe_data.get('normal', {})
+            dim_keys = [k for k in normal.keys() if k.startswith('r2_test_dim_')]
+            if dim_keys:
+                dim_indices = [int(k.split('_')[-1]) for k in dim_keys]
+                total_dims = max(dim_indices) + 1
+                break
+        if total_dims is not None:
+            break
+
+    if total_dims is None:
+        raise ValueError('No per-dimension metrics found in results.')
+
+    # Accumulate values per (dim, layer) over generation steps
+    dim_layer_vals: Dict[int, Dict[int, List[float]]] = {d: {L: [] for L in layers_sorted} for d in range(total_dims)}
+
+    for layer_key, layer_data in by_layer.items():
+        try:
+            L = int(layer_key.split('_')[1])
+        except Exception:
+            continue
+        for gen_key, probe_data in layer_data.items():
+            normal = probe_data.get('normal', {})
+            for d in range(total_dims):
+                key = f'r2_test_dim_{d}'
+                if key in normal:
+                    dim_layer_vals[d][L].append(normal[key])
+
+    # Average over gen steps and align to layers_sorted
+    dim_to_layer_values: Dict[int, List[float]] = {}
+    for d in range(total_dims):
+        values = []
+        for L in layers_sorted:
+            vals = dim_layer_vals[d][L]
+            values.append(float(np.mean(vals)) if len(vals) else np.nan)
+        dim_to_layer_values[d] = values
+
+    return layers_sorted, total_dims, dim_to_layer_values
+
+
 def build_color_palettes(D: int):
+    """Build high-contrast color shades for dims 1..D (dark→light)."""
     reds_cmap = mpl.cm.get_cmap('Reds')
     blues_cmap = mpl.cm.get_cmap('Blues')
     greens_cmap = mpl.cm.get_cmap('Greens')
 
-    def shades(cmap):
-        return [cmap(0.95 - 0.5 * (i / max(1, D - 1))) for i in range(D)]
+    # For Matplotlib 'Reds/Blues/Greens': t=0 is very light, t=1 is darkest.
+    # Make dim 1 darkest → dim D lightest with a wide dynamic range.
+    t_vals = np.linspace(0.98, 0.15, D)  # strong contrast
 
-    reds = shades(reds_cmap)
-    blues = shades(blues_cmap)
-    greens = shades(greens_cmap)
+    reds = [reds_cmap(t) for t in t_vals]
+    blues = [blues_cmap(t) for t in t_vals]
+    greens = [greens_cmap(t) for t in t_vals]
     return reds, blues, greens
 
 
@@ -150,11 +211,56 @@ def make_grouped_plot(mean_r2: List[float], total_dims: int, output_path: Path, 
     rep_red = mpl.patches.Patch(color=mpl.cm.Reds(0.9), label='First action (dims 1→7 dark→light)')
     rep_blue = mpl.patches.Patch(color=mpl.cm.Blues(0.9), label='Middle action (dims 1→7 dark→light)')
     rep_green = mpl.patches.Patch(color=mpl.cm.Greens(0.9), label='Last action (dims 1→7 dark→light)')
-    ax.legend(handles=[rep_red, rep_blue, rep_green], loc='upper right')
+    ax.legend(handles=[rep_red, rep_blue, rep_green], loc='upper left', bbox_to_anchor=(1.02, 1.0), borderaxespad=0.)
+    plt.subplots_adjust(right=0.8)
 
     ax.set_ylabel('R² (mean across layers)', fontsize=12)
     ax.set_title('Hidden → Actions: Per-dimension R² grouped by horizon (First | Middle | Last)', fontsize=14)
     ax.grid(True, axis='y', alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def make_by_layer_line_plot(results: Dict, output_path: Path, debug: bool = False):
+    layers_sorted, total_dims, dim_to_layer_values = collect_per_dim_r2_by_layer(results)
+
+    # Expect total_dims = 3 * D when selection is first_middle_last
+    D = total_dims // 3 if total_dims % 3 == 0 else total_dims
+    reds, blues, greens = build_color_palettes(D)
+
+    fig, ax = plt.subplots(figsize=(14, 8))
+
+    for d in range(total_dims):
+        if total_dims % 3 == 0:
+            block = d // D  # 0:first, 1:middle, 2:last
+            idx_in_block = d % D
+            if block == 0:
+                color = reds[idx_in_block]
+            elif block == 1:
+                color = blues[idx_in_block]
+            else:
+                color = greens[idx_in_block]
+        else:
+            # Fallback single palette if not divisible by 3
+            color = mpl.cm.tab20(d % 20)
+
+        y = np.array(dim_to_layer_values[d], dtype=float)
+        ax.plot(layers_sorted, y, '-o', markersize=3, linewidth=1.8, color=color, alpha=0.9)
+
+    ax.set_xlabel('Layer Index', fontsize=12)
+    ax.set_ylabel('R² (Normal baseline)', fontsize=12)
+    ax.set_title('Hidden → Actions: R² by layer (First | Middle | Last, dims 1→7 dark→light)', fontsize=14)
+    ax.set_xticks(layers_sorted)
+    ax.grid(True, alpha=0.3)
+
+    # Group-level legend
+    rep_red = mpl.patches.Patch(color=mpl.cm.Reds(0.9), label='First action (dims 1→7 dark→light)')
+    rep_blue = mpl.patches.Patch(color=mpl.cm.Blues(0.9), label='Middle action (dims 1→7 dark→light)')
+    rep_green = mpl.patches.Patch(color=mpl.cm.Greens(0.9), label='Last action (dims 1→7 dark→light)')
+    ax.legend(handles=[rep_red, rep_blue, rep_green], loc='upper left', bbox_to_anchor=(1.02, 1.0), borderaxespad=0.)
+    plt.subplots_adjust(right=0.8)
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
@@ -183,17 +289,27 @@ def main():
 
     mean_r2, total_dims = collect_per_dim_r2(results)
 
-    out_path = Path(args.output) if args.output else (results_dir / 'plots_custom' / 'experiment_1_action_dims_grouped.png')
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Outputs
+    if args.output:
+        out_grouped = Path(args.output)
+        out_by_layer = out_grouped.with_name(out_grouped.stem + '_by_layer.png')
+    else:
+        base = results_dir / 'plots_custom'
+        out_grouped = base / 'experiment_1_action_dims_grouped.png'
+        out_by_layer = base / 'experiment_1_action_dims_by_layer.png'
+
+    out_grouped.parent.mkdir(parents=True, exist_ok=True)
 
     if args.debug:
         print(f"[DEBUG] Total dims: {total_dims}")
-        print(f"[DEBUG] Writing plot to: {out_path}")
+        print(f"[DEBUG] Writing grouped plot to: {out_grouped}")
+        print(f"[DEBUG] Writing by-layer plot to: {out_by_layer}")
 
-    make_grouped_plot(mean_r2, total_dims, out_path, debug=args.debug)
-    print(f"[INFO] Saved grouped action-dimension plot to: {out_path}")
+    make_grouped_plot(mean_r2, total_dims, out_grouped, debug=args.debug)
+    make_by_layer_line_plot(results, out_by_layer, debug=args.debug)
+    print(f"[INFO] Saved grouped action-dimension plot to: {out_grouped}")
+    print(f"[INFO] Saved by-layer action-dimension plot to: {out_by_layer}")
 
 
 if __name__ == '__main__':
     main()
-

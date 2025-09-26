@@ -78,6 +78,12 @@ class LinearProbe:
         
         start_time = time.time()
         
+        # Flatten features to 2D if needed: [N, ...] -> [N, D]
+        if X.ndim > 2:
+            X = X.reshape(X.shape[0], -1)
+        elif X.ndim == 1:
+            X = X.reshape(-1, 1)
+
         # Split data
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=test_size, random_state=self.random_seed

@@ -19,6 +19,8 @@ sys.path.append('/u/xzhang42/Inspire')
 
 from probing.experiments.experiment_1_hidden_to_actions import run_experiment_1
 from probing.experiments.experiment_2_vision_to_actions import run_experiment_2
+from probing.experiments.experiment_3_hidden_to_concepts import run_experiment_3_general_1
+from probing.experiments.experiment_4_vision_to_concepts import run_experiment_4_general_1
 
 
 def main():
@@ -51,6 +53,9 @@ def main():
     # Experiment 2 specific options
     parser.add_argument('--vision-type', choices=["raw", "vlm", "both"], default="both",
                        help='Which vision features to probe for experiment 2 (default: both)')
+    # Experiment 3/4 task category (currently only general_1 is supported)
+    parser.add_argument('--task-category', choices=["general_1"], default="general_1",
+                       help='Which probing task category to run (for exp 3/4).')
     
     # Debug options
     parser.add_argument('--debug', action='store_true',
@@ -133,12 +138,31 @@ def main():
             )
             
         elif args.experiment == 3:
-            print(f"[DEBUG] Experiment 3 not yet implemented")
-            raise NotImplementedError("Experiment 3: [Hidden state] -> visual concepts not yet implemented")
+            print(f"[DEBUG] Running Experiment 3: [Hidden state] -> visual concepts (general_1)")
+            results = run_experiment_3_general_1(
+                data_root=args.data_path,
+                output_dir=args.output_dir,
+                layers=args.layers,
+                generation_steps=args.generation_steps,
+                successful_only=args.successful_only,
+                max_tasks=args.max_episodes,  # reuse as cap on number of tasks
+                test_size=args.test_size,
+                random_seed=args.random_seed,
+                debug=args.debug
+            )
             
         elif args.experiment == 4:
-            print(f"[DEBUG] Experiment 4 not yet implemented")
-            raise NotImplementedError("Experiment 4: [Vision encoder outputs] -> visual concepts not yet implemented")
+            print(f"[DEBUG] Running Experiment 4: [Vision encoder outputs] -> visual concepts (general_1)")
+            results = run_experiment_4_general_1(
+                data_root=args.data_path,
+                output_dir=args.output_dir,
+                vision_type=args.vision_type,
+                successful_only=args.successful_only,
+                max_tasks=args.max_episodes,  # reuse as cap on number of tasks
+                test_size=args.test_size,
+                random_seed=args.random_seed,
+                debug=args.debug
+            )
             
     except Exception as e:
         print(f"[ERROR] Experiment {args.experiment} failed: {e}")

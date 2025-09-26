@@ -15,13 +15,18 @@ from typing import Dict, List, Tuple, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HASH_DIR = REPO_ROOT / "test" / "hash"
-OUT_1 = REPO_ROOT / "experiment_1.txt"   # legacy
-OUT_2 = REPO_ROOT / "experiment_2.txt"   # legacy
-OUT_GENERAL_1 = REPO_ROOT / "experiment_general_task_1.txt"
-OUT_GENERAL_2 = REPO_ROOT / "experiment_general_task_2.txt"
-OUT_SPATIAL_1 = REPO_ROOT / "experiment_spatial_task_1.txt"
-OUT_SPATIAL_2 = REPO_ROOT / "experiment_spatial_task_2.txt"
-OUT_SPATIAL_3 = REPO_ROOT / "experiment_spatial_task_3.txt"
+
+# Write requested selection lists under test/
+OUT_DIR = REPO_ROOT / "test"
+OUT_GENERAL_1 = OUT_DIR / "selected_general_1.txt"
+OUT_GENERAL_2 = OUT_DIR / "selected_general_2.txt"
+OUT_SPATIAL_1 = OUT_DIR / "selected_spatial_1.txt"
+OUT_SPATIAL_2 = OUT_DIR / "selected_spatial_2.txt"
+OUT_SPATIAL_3 = OUT_DIR / "selected_spatial_3.txt"
+
+# Legacy combined outputs retained for reference
+OUT_1 = REPO_ROOT / "experiment_1.txt"
+OUT_2 = REPO_ROOT / "experiment_2.txt"
 
 
 def load_hashes() -> List[Tuple[str, Dict, Dict]]:
@@ -378,15 +383,21 @@ def select_by_category(task_key: str, rel: Dict, chk: Dict, *, header_extra: Opt
                 out["g2"].append("\n".join(lines))
 
     # Spatial Task 1
-    if is_specific_drawer(lang) and tgt:
-        top = first_or_none([s for s in sites_all if ("drawer" in s.lower() and "top" in s.lower())])
-        bottom = first_or_none([s for s in sites_all if ("drawer" in s.lower() and "bottom" in s.lower())])
+    if is_specific_drawer(lang):
+        def is_top_site(name: str) -> bool:
+            nl = name.lower()
+            return ("top" in nl) and ("region" in nl)
+        def is_bottom_site(name: str) -> bool:
+            nl = name.lower()
+            return ("bottom" in nl) and ("region" in nl)
+        top = first_or_none([s for s in sites_all if is_top_site(s)])
+        bottom = first_or_none([s for s in sites_all if is_bottom_site(s)])
         lines = ["Spatial Task 1 (Specific Drawer)"]
         for name in filter(None, [
             f"is_open({top})" if top else None,
             f"is_open({bottom})" if bottom else None,
-            f"contact({tgt},{top})" if (top) else None,
-            f"contact({tgt},{bottom})" if (bottom) else None,
+            f"contact({tgt},{top})" if (tgt and top) else None,
+            f"contact({tgt},{bottom})" if (tgt and bottom) else None,
         ]):
             if name in all_names:
                 lines.append(f"  - {name} {src_of(name)}")
@@ -431,12 +442,15 @@ def select_by_category(task_key: str, rel: Dict, chk: Dict, *, header_extra: Opt
 
 def main():
     hash_triplets = load_hashes()
+    total_tasks = len(hash_triplets)
     # Prepare output buckets
     g1_blocks: List[str] = []
     g2_blocks: List[str] = []
     s1_blocks: List[str] = []
     s2_blocks: List[str] = []
     s3_blocks: List[str] = []
+    # Counters per category
+    g1_n = g2_n = s1_n = s2_n = s3_n = 0
 
     # Iterate all hash files; use meta.scene_name and meta.task_id (if present)
     for task_key, rel, chk in hash_triplets:
@@ -450,14 +464,19 @@ def main():
         chosen = select_by_category(task_key, rel, chk, header_extra=header_extra)
         if chosen["g1"]:
             g1_blocks.extend([chosen["g1"], ""]) 
+            g1_n += 1
         if chosen["g2"]:
             g2_blocks.extend([chosen["g2"], ""]) 
+            g2_n += 1
         if chosen["s1"]:
             s1_blocks.extend([chosen["s1"], ""]) 
+            s1_n += 1
         if chosen["s2"]:
             s2_blocks.extend([chosen["s2"], ""]) 
+            s2_n += 1
         if chosen["s3"]:
             s3_blocks.extend([chosen["s3"], ""]) 
+            s3_n += 1
 
     # Write separate files per category
     OUT_GENERAL_1.write_text(("\n".join(g1_blocks)).strip() + "\n")
@@ -475,12 +494,12 @@ def main():
     combined_text = ("\n".join(combined)).strip() + "\n"
     OUT_1.write_text(combined_text)
     OUT_2.write_text(combined_text)
-    print("Wrote category files:")
-    print(f" - {OUT_GENERAL_1}")
-    print(f" - {OUT_GENERAL_2}")
-    print(f" - {OUT_SPATIAL_1}")
-    print(f" - {OUT_SPATIAL_2}")
-    print(f" - {OUT_SPATIAL_3}")
+    print("Wrote category files under test/:")
+    print(f" - general_1: {g1_n}/{total_tasks} → {OUT_GENERAL_1}")
+    print(f" - general_2: {g2_n}/{total_tasks} → {OUT_GENERAL_2}")
+    print(f" - spatial_1: {s1_n}/{total_tasks} → {OUT_SPATIAL_1}")
+    print(f" - spatial_2: {s2_n}/{total_tasks} → {OUT_SPATIAL_2}")
+    print(f" - spatial_3: {s3_n}/{total_tasks} → {OUT_SPATIAL_3}")
 
 
 if __name__ == "__main__":
