@@ -3,8 +3,8 @@ set -e
 
 # Full dataset collection settings (edit here; no CLI args required)
 NUM_TASKS=90
-SAVE_DIR="/work/nvme/bfbo/xzhang42/data/full_run"
-TASK_SUITE="libero_90"
+SAVE_DIR="/work/nvme/bfbo/xzhang42/data/single_episode"
+TASK_SUITES=("libero_90" "libero_10")
 NUM_TRIALS_PER_TASK=1
 NUM_GPUS=4
 NUM_PROCESSES=32
@@ -20,7 +20,8 @@ export HF_HOME=/work/nvme/bfbo/xzhang42/huggingface
 
 mkdir -p "$SAVE_DIR" "$SAVE_DIR/results" "$SAVE_DIR/trajectory_data"
 
-echo "=== Step 1 ==="
+for TASK_SUITE in "${TASK_SUITES[@]}"; do
+  echo "=== Suite: $TASK_SUITE | Step 1: Collect ==="
 python /u/xzhang42/Inspire/vla_scripts/parallel_libero_evaluator.py \
   --pretrained-checkpoint /work/nvme/bfbo/xzhang42/Inspire/runs/minivla-libero-90 \
   --task-suite-name "$TASK_SUITE" \
@@ -34,14 +35,14 @@ python /u/xzhang42/Inspire/vla_scripts/parallel_libero_evaluator.py \
 
 echo "Concept CSVs saved under: $SAVE_DIR/trajectory_data/concepts/"
 
-echo "=== Step 2 ==="
+  echo "=== Suite: $TASK_SUITE | Step 2: Combine optimized ==="
 python /u/xzhang42/Inspire/vla_scripts/combine_optimized_trajectory_files.py \
   --temp-dir "$SAVE_DIR/trajectory_data/temp_trajectory_processing" \
   --output-dir "$SAVE_DIR/optimized_trajectory_data" \
   --task-suite "$TASK_SUITE" \
   --cleanup-temp
 
-echo "=== Step 3 ==="
+  echo "=== Suite: $TASK_SUITE | Step 3: Inspect ==="
 python -c "
 import sys, json
 from pathlib import Path
@@ -54,7 +55,7 @@ total = sum(f.stat().st_size for f in p.rglob('*.h5'))
 print(f'Total size GB: {total/1024/1024/1024:.2f}')
 "
 
-echo "=== Step 4 ==="
+  echo "=== Suite: $TASK_SUITE | Step 4: (Optional) Reconstruct ==="
 if [[ "$RECONSTRUCT_IMAGES" == "true" || "$RECONSTRUCT_STATES" == "true" ]]; then
   RECON_ARGS=("$COMBINED_FILE" "--task-suite-name" "$TASK_SUITE")
   if [[ "$RECONSTRUCT_IMAGES" == "true" ]]; then
@@ -66,6 +67,7 @@ if [[ "$RECONSTRUCT_IMAGES" == "true" || "$RECONSTRUCT_STATES" == "true" ]]; the
     RECON_ARGS+=("--states-output-dir" "$STATES_DIR")
   fi
   python /u/xzhang42/Inspire/vla_scripts/reconstruct_trajectory_data.py "${RECON_ARGS[@]}"
-else
-  echo "reconstruction skipped"
-fi
+  else
+    echo "reconstruction skipped"
+  fi
+done

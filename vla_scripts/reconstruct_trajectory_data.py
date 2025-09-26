@@ -122,7 +122,9 @@ def load_episode_metadata(dataset_dir: str) -> pd.DataFrame:
     episode_index_path = dataset_dir / "episode_index.h5"
     
     if not episode_index_path.exists():
-        raise FileNotFoundError(f"Episode index not found: {episode_index_path}")
+        raise FileNotFoundError(
+            f"Episode index not found: {episode_index_path}. If you passed a shard directory, ensure it contains a shard-local episode_index.h5."
+        )
     
     print(f"[debug-metadata] Loading episode metadata from {episode_index_path}")
     
@@ -340,21 +342,30 @@ def reconstruct_trajectory_episode(
     
     episode_info = episode_metadata.iloc[episode_idx]
     
-    # Extract episode information
-    task_id = int(episode_info['task_id'])
-    episode_id = int(episode_info['episode_id'])
-    img_task_id = int(episode_info['img_task_id'])
-    img_episode_id = int(episode_info['img_episode_id'])
-    img_env_seed = int(episode_info['img_env_seed'])
-    num_timesteps = int(episode_info['num_timesteps'])
-    start_idx = int(episode_info['start_idx'])
-    end_idx = int(episode_info['end_idx'])
-    task_description = episode_info['task_description']
+    # Extract episode information (support monolithic and shard-local indices)
+    cols = set(episode_metadata.columns)
+    task_id = int(episode_info['task_id']) if 'task_id' in cols else int(episode_info.get('img_task_id', 0))
+    episode_id = int(episode_info['episode_id']) if 'episode_id' in cols else int(episode_info.get('img_episode_id', 0))
+    # Prefer explicit img_* fields; else fall back
+    img_task_id = int(episode_info['img_task_id']) if 'img_task_id' in cols else task_id
+    img_episode_id = int(episode_info['img_episode_id']) if 'img_episode_id' in cols else episode_id
+    img_env_seed = int(episode_info['img_env_seed']) if 'img_env_seed' in cols else episode_id
+    num_timesteps = int(episode_info['num_timesteps']) if 'num_timesteps' in cols else int(episode_info.get('length', 0))
+    # Index ranges
+    if 'start_idx' in cols and 'end_idx' in cols:
+        start_idx = int(episode_info['start_idx'])
+        end_idx = int(episode_info['end_idx'])
+    elif 'shard_start_idx' in cols and 'shard_end_idx' in cols:
+        start_idx = int(episode_info['shard_start_idx'])
+        end_idx = int(episode_info['shard_end_idx'])
+    else:
+        raise KeyError("Episode index columns not found. Need start_idx/end_idx or shard_start_idx/shard_end_idx.")
+    task_description = episode_info['task_description'] if 'task_description' in cols else str(episode_info.get('task_name', ''))
     
     # print(f"[debug-recon] Reconstructing episode {episode_idx}: task_{task_id}/episode_{episode_id}")
     # print(f"[debug-recon] Data range: samples {start_idx}-{end_idx} ({num_timesteps} timesteps)")
     
-    # Load stored actions for this episode
+    # Load stored actions for this episode (shard-aware)
     actions_path = dataset_dir / "actions.h5"
     with h5py.File(actions_path, 'r') as f:
         # Extract actions for this episode using index range
