@@ -24,19 +24,25 @@ Available modalities (stored in HDF5 under `/optimized_trajectory_data/`):
 - Images: Reconstructable from episode metadata via LIBERO.
 - Simulator states: Reconstructable by replaying actions in LIBERO.
 
-Storage layout:
 
 ```
+
+Task‑sharded layout (per scene/instruction):
+```
 /optimized_trajectory_data/
-├── actions.h5                    # [N_samples, action_horizon]
-├── hidden_states/
-│   ├── generation_step_0.h5     # datasets: layer_00..layer_24 → [N_samples, hidden_dim]
-│   ├── generation_step_1.h5
-│   └── ... generation_step_6.h5
-├── vision_features.h5           # [N_samples, num_patches, vision_dim]
-├── vlm_embeddings.h5            # [N_samples, vlm_embed_dim]
-├── episode_index.h5             # episode metadata + [start_idx, end_idx]
-└── dataset_summary.json         # stats and metadata
+├── dataset_summary.json            # optional
+├── episode_index.h5                # optional global index (may be absent)
+├── <scene>__<instruction>/         # shard directory
+│   ├── actions.h5                  # [N_rows, action_horizon]
+│   ├── vision_features.h5          # [N_rows, num_patches, vision_dim]
+│   ├── vlm_embeddings.h5           # [N_rows, vlm_embed_dim]
+│   ├── hidden_states/
+│   │   ├── generation_step_0.h5    # datasets: layer_00..layer_24 → [N_rows, ...]
+│   │   └── generation_step_6.h5
+│   ├── concepts.h5                 # datasets: concepts, concept_names, episode_success
+│   └── episode_index.h5            # shard‑local index: task_id, episode_id, success, num_timesteps,
+│                                   # shard_start_idx, shard_end_idx (row offsets)
+└── ... (other shards)
 ```
 
 Detailed specs:
@@ -60,8 +66,15 @@ Detailed specs:
   - Storage: `vlm_embeddings.h5`.
 
 - Episode Metadata (Reconstruction Clues)
-  - Contents: `img_task_id`, `img_episode_id`, `img_env_seed`, `num_timesteps`, `task_description`, `success`, `start_idx`, `end_idx`.
-  - Storage: `episode_index.h5`.
+  - Contents (monolithic): `img_task_id`, `img_episode_id`, `img_env_seed`, `num_timesteps`, `task_description`, `success`, `start_idx`, `end_idx`.
+  - Contents (sharded): per‑shard `episode_index.h5` includes `task_id`, `episode_id`, `success`, `num_timesteps`, `shard_start_idx`, `shard_end_idx`.
+  - Storage: Root `episode_index.h5` (optional) plus per‑shard `episode_index.h5` (present in sharded mode).
+
+Association and success hashing (sharded mode):
+- Row alignment: all shard arrays share the same row axis and align index‑wise.
+- Per episode: slice `[s0:s1] = [shard_start_idx, shard_end_idx]` across arrays to get a single trajectory’s data.
+- Success label: `concepts.h5/episode_success[i]` is the per‑row success flag (constant within `[s0,s1]`) and equals `episode_index.h5/success`.
+- Stable trajectory key: `(scene_key=<shard dir>, task_id, episode_id)`; hash this string to bucket success/failure deterministically.
 
 Action chunking caveat (important):
 

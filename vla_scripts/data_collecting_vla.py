@@ -133,6 +133,30 @@ class DataCollectingVLA(OpenVLA):
         else:
             raise ValueError(f"Unsupported `pixel_values` type = {type(pixel_values)}")
 
+        # Debug & dtype harmonization for CPU runs: ensure pixel dtype matches featurizer/bias dtype
+        try:
+            if not torch.cuda.is_available():
+                # Probe a representative dtype from the vision backbone
+                rep_dtype = None
+                try:
+                    # Try DinoSigLIP structure
+                    if hasattr(self.vision_backbone, 'dino_featurizer'):
+                        rep_dtype = next(self.vision_backbone.dino_featurizer.parameters()).dtype
+                    else:
+                        rep_dtype = next(self.vision_backbone.parameters()).dtype
+                except Exception:
+                    rep_dtype = None
+                if rep_dtype is not None:
+                    import os as _os
+                    if str(_os.environ.get("DCV_DEBUG_DTYPE","0")).strip() in ("1","true","True"):
+                        print(f"[DCV-DTYPE] CPU run: casting pixel_values to {rep_dtype}")
+                    if isinstance(pixel_values, torch.Tensor):
+                        pixel_values = pixel_values.to(dtype=rep_dtype)
+                    elif isinstance(pixel_values, dict):
+                        pixel_values = {k: v.to(dtype=rep_dtype) for k, v in pixel_values.items()}
+        except Exception:
+            pass
+
         # Initialize collected data
         collected_data = {}
         
@@ -290,11 +314,29 @@ class DataCollectingVLA(OpenVLA):
             # Look for the projector in the model (this transforms patches to LLM space)
             if hasattr(self, 'projector') and self.projector is not None:
                 # Standard path - projector is a direct attribute
+                try:
+                    proj_dtype = next(self.projector.parameters()).dtype
+                except Exception:
+                    proj_dtype = None
+                if proj_dtype is not None and patch_features.dtype != proj_dtype:
+                    import os as _os
+                    if str(_os.environ.get('DCV_DEBUG_DTYPE','0')).strip() in ('1','true','True'):
+                        print(f"[DCV-DTYPE] Casting patch_features {patch_features.dtype} -> projector dtype {proj_dtype}")
+                    patch_features = patch_features.to(dtype=proj_dtype)
                 vlm_embeddings = self.projector(patch_features)
                 print(f"[debug-visual] VLM projector output shape: {vlm_embeddings.shape}")
                 
             elif hasattr(self, 'vision_backbone') and hasattr(self.vision_backbone, 'projector'):
                 # Alternative: projector might be part of vision backbone
+                try:
+                    proj_dtype = next(self.vision_backbone.projector.parameters()).dtype
+                except Exception:
+                    proj_dtype = None
+                if proj_dtype is not None and patch_features.dtype != proj_dtype:
+                    import os as _os
+                    if str(_os.environ.get('DCV_DEBUG_DTYPE','0')).strip() in ('1','true','True'):
+                        print(f"[DCV-DTYPE] Casting patch_features {patch_features.dtype} -> vb.projector dtype {proj_dtype}")
+                    patch_features = patch_features.to(dtype=proj_dtype)
                 vlm_embeddings = self.vision_backbone.projector(patch_features)
                 print(f"[debug-visual] Vision backbone projector output shape: {vlm_embeddings.shape}")
                 
@@ -308,6 +350,15 @@ class DataCollectingVLA(OpenVLA):
                         break
                 
                 if projector is not None:
+                    try:
+                        proj_dtype = next(projector.parameters()).dtype
+                    except Exception:
+                        proj_dtype = None
+                    if proj_dtype is not None and patch_features.dtype != proj_dtype:
+                        import os as _os
+                        if str(_os.environ.get('DCV_DEBUG_DTYPE','0')).strip() in ('1','true','True'):
+                            print(f"[DCV-DTYPE] Casting patch_features {patch_features.dtype} -> found projector dtype {proj_dtype}")
+                        patch_features = patch_features.to(dtype=proj_dtype)
                     vlm_embeddings = projector(patch_features)
                     print(f"[debug-visual] Found projector output shape: {vlm_embeddings.shape}")
                 else:

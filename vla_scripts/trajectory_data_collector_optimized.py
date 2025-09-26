@@ -152,13 +152,18 @@ class OptimizedTrajectoryDataCollector:
                 'episode_id': episode_id,
                 'success': success,
                 'task_description': task_description,
+                'scene_name': (image_reconstruction_clues.get('scene_name') if isinstance(image_reconstruction_clues, dict) else 'unknown') or 'unknown',
                 'num_timesteps': len(hidden_states_data),
+                # Global indices within this collector's accumulation
                 'start_idx': episode_start_idx,
                 'end_idx': episode_end_idx,
+                # Local (orig) indices for per-process slicing during combine
+                'orig_start_idx': episode_start_idx,
+                'orig_end_idx': episode_end_idx,
                 # Reconstruction clues
-                'img_task_id': image_reconstruction_clues.get('task_id', task_id),
-                'img_episode_id': image_reconstruction_clues.get('episode_id', episode_id),
-                'img_env_seed': image_reconstruction_clues.get('env_seed', episode_id)
+                'img_task_id': image_reconstruction_clues.get('task_id', task_id) if isinstance(image_reconstruction_clues, dict) else task_id,
+                'img_episode_id': image_reconstruction_clues.get('episode_id', episode_id) if isinstance(image_reconstruction_clues, dict) else episode_id,
+                'img_env_seed': image_reconstruction_clues.get('env_seed', episode_id) if isinstance(image_reconstruction_clues, dict) else episode_id,
             }
             
             self.accumulated_data['episodes'].append(episode_metadata)
@@ -326,6 +331,180 @@ def combine_chunks_to_optimized_format(
     print(f"[CHUNK_COMBINER] Generation steps: {sorted(all_generation_steps)}")
     print(f"[CHUNK_COMBINER] Layer indices: {sorted(all_layer_indices)}")
     
+    # Build per-task groups
+    from collections import defaultdict as _dd
+    def _sanitize(name: str):
+        import re
+        s=(name or '').strip().lower(); s=re.sub(r"\s+","_",s); s=re.sub(r"[^a-z0-9_\-]","",s)
+        return s or 'task'
+    def _scene(ep):
+        sc=ep.get('scene_name') or ep.get('scene') or 'unknown'
+        return sc if isinstance(sc,str) else str(sc)
+    groups={}
+    # Preserve local indices: record orig_start_idx/orig_end_idx before global adjust above
+    # If not present, reconstruct by subtracting per-process sample_offset; here we expect orig_* fields exist.
+    # Build episodes_by_process with local indices
+    local_eps = []
+    # Recover local indices by subtracting cumulative sample_offset values recorded earlier
+    # As we don't have per-progress offsets kept, rely on orig_start_idx/orig_end_idx if present
+    for manifest in manifests:
+        proc_dir = manifest['process_dir']
+        eps_path = proc_dir/ 'episodes_chunk.json'
+        if not eps_path.exists():
+            continue
+        eps = json.load(eps_path.open('r'))
+        for e in eps:
+            desc = str(e.get('task_description') or e.get('task_name') or '')
+            sc = _scene(e)
+            key = f"{_sanitize(sc)}__{_sanitize(desc)}"
+            groups.setdefault(key, []).append({'proc_dir': proc_dir,
+                                               'local_start': int(e.get('start_idx',0)),
+                                               'local_end': int(e.get('end_idx',-1)),
+                                               'task_id': e.get('task_id', -1),
+                                               'episode_id': e.get('episode_id', -1),
+                                               'success': e.get('success', True)})
+    # Prepare per-process chunk paths
+    proc_actions={}; proc_vision={}; proc_vlm={}; proc_hidden={}
+    for m in manifests:
+        pdir=m['process_dir']
+        ap=pdir/'actions_chunk.h5'
+        vp=pdir/'vision_features_chunk.h5'
+        lp=pdir/'vlm_embeddings_chunk.h5'
+        if ap.exists(): proc_actions[pdir]=ap
+        if vp.exists(): proc_vision[pdir]=vp
+        if lp.exists(): proc_vlm[pdir]=lp
+        for gs in sorted(all_generation_steps):
+            hp=pdir/'hidden_states'/f'generation_step_{gs}_chunk.h5'
+            if hp.exists(): proc_hidden.setdefault(pdir,{})[gs]=hp
+    # Concepts source
+    concepts_root = temp_dir.parent / 'concepts'
+    concept_cache={}
+    import csv as _csv
+    # Write shards
+    for key, items in groups.items():
+        shard_dir = output_dir / key
+        (shard_dir/'hidden_states').mkdir(parents=True, exist_ok=True)
+        acts=[]; vis=[]; vlm=[]
+        hidden = {gs: {} for gs in sorted(all_generation_steps)}
+        # concepts
+        concept_names=[]; name_to_idx={}; concept_rows=[]; ptr={}
+        # Per-row success labels to align with concepts/actions rows
+        row_success_segments=[]
+        # Per-episode local offsets within this shard for index writing
+        shard_ep_records=[]
+        local_cursor=0
+        base = key.split('__',1)[1]
+        for it in items:
+            pdir=it['proc_dir']; ls=int(it['local_start']); le=int(it['local_end'])
+            if le<ls: continue
+            seg_len = (le - ls + 1)
+            ap=proc_actions.get(pdir)
+            if ap is not None:
+                with h5py.File(ap,'r') as f: acts.append(f['actions'][ls:le+1])
+            vp=proc_vision.get(pdir)
+            if vp is not None:
+                with h5py.File(vp,'r') as f: vis.append(f['vision_features'][ls:le+1])
+            lp=proc_vlm.get(pdir)
+            if lp is not None:
+                with h5py.File(lp,'r') as f: vlm.append(f['vlm_embeddings'][ls:le+1])
+            for gs,hp in proc_hidden.get(pdir,{}).items():
+                with h5py.File(hp,'r') as f:
+                    for ds in f.keys():
+                        if not ds.startswith('layer_'): continue
+                        li=int(ds.split('_')[1])
+                        hidden[gs].setdefault(li, [])
+                        hidden[gs][li].append(f[ds][ls:le+1])
+            # concepts
+            if concepts_root.exists():
+                proc_name = pdir.name
+                csvp = concepts_root / proc_name / f'{base}__relations.csv'
+                if not csvp.exists():
+                    alt = concepts_root / proc_name / f'{base}.csv'
+                    if not alt.exists():
+                        raise FileNotFoundError(f"[concepts] Missing CSV for base '{base}' in {proc_name}: tried {csvp} and {alt}")
+                    csvp = alt
+                ck = (proc_name, base)
+                if ck not in concept_cache:
+                    rows = list(_csv.reader(csvp.open('r', newline='')))
+                    i0 = 0
+                    if rows and rows[0] and isinstance(rows[0][0], str) and rows[0][0].startswith('#'):
+                        i0 = 1
+                    order = []
+                    series = []
+                    for r in rows[i0+1:]:
+                        if not r:
+                            continue
+                        order.append(r[0])
+                        try:
+                            vals = [int(x) for x in r[1:]]
+                        except Exception:
+                            vals = []
+                        series.append(vals)
+                    C = len(order)
+                    T = max((len(series[j]) for j in range(C)), default=0)
+                    mat = np.zeros((T, C), dtype=np.int8)
+                    for j in range(C):
+                        col = series[j]
+                        if col:
+                            tlen = min(T, len(col))
+                            mat[:tlen, j] = np.asarray(col[:tlen], dtype=np.int8)
+                    concept_cache[ck] = (order, mat)
+                order, mat = concept_cache[ck]
+                for n in order:
+                    if n not in name_to_idx:
+                        name_to_idx[n]=len(concept_names); concept_names.append(n)
+                pcur=ptr.get(ck,0); seg=mat[pcur:pcur+seg_len,:]; ptr[ck]=pcur+seg_len
+                row=np.zeros((seg.shape[0], len(concept_names)), dtype=np.int8)
+                for j,n in enumerate(order): row[:, name_to_idx[n]] = seg[:, j]
+                concept_rows.append(row)
+            # Accumulate per-row success labels and shard-local episode index
+            row_success_segments.append(np.full((seg_len,), 1 if it.get('success', True) else 0, dtype=np.int8))
+            shard_ep_records.append({
+                'task_id': int(it.get('task_id', -1)),
+                'episode_id': int(it.get('episode_id', -1)),
+                'success': bool(it.get('success', True)),
+                'num_timesteps': int(seg_len),
+                'shard_start_idx': int(local_cursor),
+                'shard_end_idx': int(local_cursor + seg_len - 1),
+            })
+            local_cursor += seg_len
+        comp=dict(compression='gzip', compression_opts=6, shuffle=True)
+        if acts:
+            with h5py.File(shard_dir/'actions.h5','w') as f: f.create_dataset('actions', data=np.concatenate(acts,axis=0), **comp)
+        if vis:
+            with h5py.File(shard_dir/'vision_features.h5','w') as f: f.create_dataset('vision_features', data=np.concatenate(vis,axis=0), **comp)
+        if vlm:
+            with h5py.File(shard_dir/'vlm_embeddings.h5','w') as f: f.create_dataset('vlm_embeddings', data=np.concatenate(vlm,axis=0), **comp)
+        for gs,layers in hidden.items():
+            if not layers: continue
+            with h5py.File(shard_dir/'hidden_states'/f'generation_step_{gs}.h5','w') as f:
+                for li,parts in sorted(layers.items()):
+                    comb=np.concatenate(parts,axis=0)
+                    ch=(min(10000,comb.shape[0]),)+comb.shape[1:]
+                    f.create_dataset(f'layer_{li:02d}', data=comb, chunks=ch, **comp)
+        if concept_rows and concept_names:
+            full = np.concatenate(concept_rows, axis=0) if len(concept_rows)>1 else concept_rows[0]
+            # Per-row success aligned with 'full'
+            row_success = np.concatenate(row_success_segments, axis=0) if len(row_success_segments)>1 else row_success_segments[0]
+            # Save as HDF5 per shard
+            with h5py.File(shard_dir/'concepts.h5','w') as f:
+                f.create_dataset('concepts', data=full, compression='gzip', compression_opts=6, shuffle=True)
+                f.create_dataset('episode_success', data=row_success, compression='gzip', compression_opts=6, shuffle=True)
+                import numpy as _np
+                names_arr = _np.array([n.encode('utf-8') for n in concept_names], dtype='S256')
+                f.create_dataset('concept_names', data=names_arr)
+        # Write per-shard episode index to enable 1:1 mapping between shard rows and episodes
+        if shard_ep_records:
+            import pandas as _pd
+            idx_df = _pd.DataFrame(shard_ep_records)
+            with h5py.File(shard_dir/'episode_index.h5','w') as f:
+                for col in idx_df.columns:
+                    vals = idx_df[col].values
+                    if idx_df[col].dtype == object:
+                        f.create_dataset(col, data=vals.astype('S'))
+                    else:
+                        f.create_dataset(col, data=vals, **comp)
+
     # HDF5 compression settings (removed conflicting chunks parameter)
     compression_kwargs = {
         'compression': 'gzip',
@@ -334,7 +513,7 @@ def combine_chunks_to_optimized_format(
     }
     
     # Combine actions
-    print(f"[CHUNK_COMBINER] Combining actions...")
+    print('[CHUNK_COMBINER] Skipping global actions combine (task-sharded mode)')
     actions_chunks = []
     for manifest in manifests:
         actions_path = manifest['process_dir'] / "actions_chunk.h5"
@@ -342,15 +521,15 @@ def combine_chunks_to_optimized_format(
             with h5py.File(actions_path, 'r') as f:
                 actions_chunks.append(f['actions'][:])
     
-    if actions_chunks:
+    if False and actions_chunks:
         combined_actions = np.concatenate(actions_chunks, axis=0)
         actions_output_path = output_dir / "actions.h5"
         with h5py.File(actions_output_path, 'w') as f:
             f.create_dataset('actions', data=combined_actions, **compression_kwargs)
-        print(f"[CHUNK_COMBINER] Saved combined actions: {combined_actions.shape}")
+        print('[CHUNK_COMBINER] (skipped writing global actions)') #  {combined_actions.shape}")
     
     # Combine vision features  
-    print(f"[CHUNK_COMBINER] Combining vision features...")
+    print('[CHUNK_COMBINER] Skipping global vision combine (task-sharded mode)')
     vision_chunks = []
     for manifest in manifests:
         vision_path = manifest['process_dir'] / "vision_features_chunk.h5"
@@ -358,15 +537,15 @@ def combine_chunks_to_optimized_format(
             with h5py.File(vision_path, 'r') as f:
                 vision_chunks.append(f['vision_features'][:])
     
-    if vision_chunks:
+    if False and vision_chunks:
         combined_vision = np.concatenate(vision_chunks, axis=0)
         vision_output_path = output_dir / "vision_features.h5"
         with h5py.File(vision_output_path, 'w') as f:
             f.create_dataset('vision_features', data=combined_vision, **compression_kwargs)
-        print(f"[CHUNK_COMBINER] Saved combined vision features: {combined_vision.shape}")
+        print('[CHUNK_COMBINER] (skipped writing global vision)') #  {combined_vision.shape}")
     
     # Combine VLM embeddings
-    print(f"[CHUNK_COMBINER] Combining VLM embeddings...")
+    print('[CHUNK_COMBINER] Skipping global VLM combine (task-sharded mode)')
     vlm_chunks = []
     for manifest in manifests:
         vlm_path = manifest['process_dir'] / "vlm_embeddings_chunk.h5"
@@ -374,18 +553,18 @@ def combine_chunks_to_optimized_format(
             with h5py.File(vlm_path, 'r') as f:
                 vlm_chunks.append(f['vlm_embeddings'][:])
     
-    if vlm_chunks:
+    if False and vlm_chunks:
         combined_vlm = np.concatenate(vlm_chunks, axis=0)
         vlm_output_path = output_dir / "vlm_embeddings.h5"
         with h5py.File(vlm_output_path, 'w') as f:
             f.create_dataset('vlm_embeddings', data=combined_vlm, **compression_kwargs)
-        print(f"[CHUNK_COMBINER] Saved combined VLM embeddings: {combined_vlm.shape}")
+        print('[CHUNK_COMBINER] (skipped writing global vlm)') #  {combined_vlm.shape}")
     
     # Combine hidden states by generation step (NEW FORMAT)
     hidden_states_output_dir = output_dir / "hidden_states"
     hidden_states_output_dir.mkdir(exist_ok=True)
     
-    print(f"[CHUNK_COMBINER] Combining hidden states by generation step...")
+    print('[CHUNK_COMBINER] Writing per-task shards...')
     for generation_step in sorted(all_generation_steps):
         print(f"[CHUNK_COMBINER] Processing generation step {generation_step}...")
         
@@ -405,7 +584,7 @@ def combine_chunks_to_optimized_format(
                             step_data[layer_idx].append(f[layer_dataset_name][:])
         
         # Combine and save this generation step
-        if step_data:
+        if False and step_data:
             step_output_path = hidden_states_output_dir / f"generation_step_{generation_step}.h5"
             
             with h5py.File(step_output_path, 'w') as f:
@@ -435,6 +614,7 @@ def combine_chunks_to_optimized_format(
     print(f"[CHUNK_COMBINER] Creating episode index...")
     all_episodes = []
     sample_offset = 0
+    episodes_by_process = []  # (process_dir, episodes, local_total_samples)
     
     for manifest in manifests:
         episodes_path = manifest['process_dir'] / "episodes_chunk.json"
@@ -448,6 +628,7 @@ def combine_chunks_to_optimized_format(
                     episode['end_idx'] += sample_offset
                 
                 all_episodes.extend(process_episodes)
+                episodes_by_process.append((manifest['process_dir'], process_episodes, manifest['total_samples']))
                 sample_offset += manifest['total_samples']
     
     # Create episode index DataFrame and save
@@ -465,6 +646,105 @@ def combine_chunks_to_optimized_format(
     
     print(f"[CHUNK_COMBINER] Saved episode index: {len(episode_df)} episodes")
     
+    # Combine concepts into optimized dir
+    try:
+        concepts_root = temp_dir.parent / "concepts"
+        if concepts_root.exists():
+            print(f"[CHUNK_COMBINER] Combining concepts from {concepts_root} ...")
+            import csv
+            import re as _re
+            def _sanitize(name: str) -> str:
+                s = (name or "").strip().lower()
+                s = _re.sub(r"\s+", "_", s)
+                s = _re.sub(r"[^a-z0-9_\-]", "", s)
+                return s or "task"
+            cache = {}
+            global_names = []
+            global_name_set = set()
+            for proc_dir, eps, _loc_total in episodes_by_process:
+                proc_name = Path(proc_dir).name
+                proc_concepts_dir = concepts_root / proc_name
+                if not proc_concepts_dir.exists():
+                    continue
+                task_bases = {_sanitize(e.get('task_description','')) for e in eps}
+                for base in task_bases:
+                    csv_path = proc_concepts_dir / f"{base}__relations.csv"
+                    if not csv_path.exists():
+                        continue
+                    with csv_path.open('r', newline='') as f:
+                        rdr = csv.reader(f); rows=list(rdr)
+                    i0 = 0
+                    if rows and rows[0] and isinstance(rows[0][0], str) and rows[0][0].startswith('#'):
+                        i0 = 1
+                    for r in rows[i0+1:]:
+                        if not r: continue
+                        name = r[0]
+                        if name not in global_name_set:
+                            global_name_set.add(name)
+                            global_names.append(name)
+            if global_names:
+                global_names = sorted(global_names)
+                name_to_idx = {n:i for i,n in enumerate(global_names)}
+                import numpy as _np
+                total_samples = sum((e['end_idx']-e['start_idx']+1) for e in all_episodes)
+                concepts_mat = _np.zeros((total_samples, len(global_names)), dtype=_np.int8)
+                def _load_matrix(proc_name: str, base: str):
+                    key=(proc_name, base)
+                    if key in cache: return cache[key]
+                    csv_path = concepts_root / proc_name / f"{base}__relations.csv"
+                    if not csv_path.exists():
+                        alt = concepts_root / proc_name / f"{base}.csv"
+                        csv_path = alt
+                    with csv_path.open('r', newline='') as f:
+                        rdr = csv.reader(f); rows=list(rdr)
+                    i0 = 0
+                    if rows and rows[0] and isinstance(rows[0][0], str) and rows[0][0].startswith('#'):
+                        i0 = 1
+                    order=[]; series=[]
+                    for r in rows[i0+1:]:
+                        if not r: continue
+                        order.append(r[0])
+                        try: vals=[int(x) for x in r[1:]]
+                        except Exception: vals=[]
+                        series.append(vals)
+                    C=len(order); T=max((len(series[j]) for j in range(C)), default=0)
+                    mat=_np.zeros((T,C), dtype=_np.int8)
+                    for j in range(C):
+                        col=series[j]; tlen=min(T,len(col))
+                        if tlen: mat[:tlen,j]=_np.asarray(col[:tlen], dtype=_np.int8)
+                    cache[key]=(order, mat); return order, mat
+                ptr={}
+                for proc_dir, eps, loc_total in episodes_by_process:
+                    proc_name=Path(proc_dir).name
+                    for e in eps:
+                        base=_sanitize(e.get('task_description',''))
+                        start=int(e['start_idx']); end=int(e['end_idx']); n=max(0, end-start+1)
+                        try:
+                            order, mat=_load_matrix(proc_name, base)
+                        except FileNotFoundError:
+                            continue
+                        key=(proc_name, base)
+                        p=ptr.get(key,0)
+                        seg=mat[p:p+n,:] if n>0 else mat[0:0,:]
+                        for j,name in enumerate(order):
+                            gi=name_to_idx.get(name)
+                            if gi is None or seg.shape[0]!=n: continue
+                            concepts_mat[start:start+n, gi]=seg[:,j]
+                        ptr[key]=p+n
+                concepts_out=output_dir/"concepts.h5"
+                with h5py.File(concepts_out,'w') as f:
+                    f.create_dataset('concepts', data=concepts_mat, **compression_kwargs)
+                    names_arr=_np.array([n.encode('utf-8') for n in global_names], dtype='S128')
+                    f.create_dataset('concept_names', data=names_arr)
+                print(f"[CHUNK_COMBINER] Saved concepts: {concepts_mat.shape} -> {concepts_out}")
+            else:
+                print(f"[CHUNK_COMBINER] No concept names found; skipping concepts.h5")
+        else:
+            print(f"[CHUNK_COMBINER] Concepts directory not found; skipping concepts merge")
+    except Exception as e:
+        print(f"[CHUNK_COMBINER] WARNING: Failed to combine concepts: {e}")
+        import traceback as _tb; _tb.print_exc()
+    
     # Create summary metadata (UPDATED for new format)
     summary_path = output_dir / "dataset_summary.json"
     summary = {
@@ -475,7 +755,7 @@ def combine_chunks_to_optimized_format(
         'layer_indices': sorted(list(all_layer_indices)),
         'successful_episodes': int(episode_df['success'].sum()),
         'created_at': time.time(),
-        'format_version': '2.0_optimized_generation_steps'
+        'format_version': '2.1_task_sharded' 
     }
     
     with open(summary_path, 'w') as f:

@@ -275,15 +275,22 @@ class ParallelLiberoEvaluator:
             process.join()
 
         self._build_logger(mode='a')
+        if len(summaries) == 0:
+            self.logger.warning("No episode summaries were produced (all workers failed or early exit). Skipping success-rate computation.")
+            self.logger.info("Evaluation finished with 0 completed episodes.")
+            return
+
         task_ids = set([summary["task_id"] for summary in summaries])
         for task_id in task_ids:
             task_summaries = [summary for summary in summaries if summary["task_id"] == task_id]
+            if not task_summaries:
+                continue
             success_rate = sum([summary["success"] for summary in task_summaries]) / len(task_summaries)
             task_description = task_summaries[0]['task']
             self.logger.info(f"Task {task_id} {task_description} success rate: {success_rate:.2f}")
         
-        success_rate = sum([summary["success"] for summary in summaries]) / len(summaries)
-        self.logger.info(f"Overall success rate: {success_rate:.2f}")
+        overall = sum([summary["success"] for summary in summaries]) / len(summaries)
+        self.logger.info(f"Overall success rate: {overall:.2f}")
         self.logger.info("Evaluation finished.")
 
     def evaluate_episodes(self, gpu, task_ids_and_episodes, show_detail, summaries, process_idx):
@@ -291,6 +298,12 @@ class ParallelLiberoEvaluator:
         os.environ["MUJOCO_EGL_DEVICE_ID"] = str(gpu)
         import sys
         import time
+        # Per-process CUDA diagnostics
+        try:
+            import torch
+            print(f"[ENV:proc {process_idx}] torch.cuda.is_available()={torch.cuda.is_available()} | cuda.device_count={torch.cuda.device_count() if torch.cuda.is_available() else 0} | assigned_gpu={gpu}", flush=True)
+        except Exception as _e:
+            print(f"[ENV:proc {process_idx}] CUDA probe failed: {_e}", flush=True)
 
         try:
             print(f"Process starting on GPU {gpu}")
@@ -400,10 +413,35 @@ class ParallelLiberoEvaluator:
         if concepts_recorders is None:
             concepts_recorders = {}
         base_name = (task_description or f"task_{task_id}")
-        recorder_key = base_name.lower()
+
+        # Derive scene name for this task to disambiguate identical instructions in different scenes
+        scene_name = "unknown"
+        # Prefer parsed_problem scene_name if available; else fallback to task name regex
+        try:
+            bddl_env = env.env if hasattr(env, "env") else env
+            parsed = getattr(bddl_env, "parsed_problem", {}) or {}
+            if parsed and parsed.get("scene_name"):
+                scene_name = str(parsed["scene_name"])  # type: ignore[index]
+        except Exception:
+            scene_name = "unknown"
+        if scene_name == "unknown":
+            tname = getattr(task, 'name', '')
+            import re as _re
+            m = _re.search(r"(.*?_SCENE\d+)", str(tname))
+            if m:
+                scene_name = m.group(1)
+
+        def _sanitize(s: str):
+            import re as _re
+            s = (s or '').strip().lower()
+            s = _re.sub(r"\s+", "_", s)
+            s = _re.sub(r"[^a-z0-9_\-]", "", s)
+            return s or 'task'
+        recorder_key = f"{_sanitize(scene_name)}__{_sanitize(base_name)}"
+
         if recorder_key not in concepts_recorders:
             concepts = select_task_concepts(env)
-            rec = CSVRelationsRecorder(task_name=str(task_description), language=str(task_description))
+            rec = CSVRelationsRecorder(task_name=str(recorder_key), language=str(task_description))
             if concepts:
                 rec.initialize(concepts)
             concepts_recorders[recorder_key] = rec
@@ -413,14 +451,7 @@ class ParallelLiberoEvaluator:
             if timestep < self.cfg.num_steps_wait:
                 obs, reward, done, info = env.step(get_libero_dummy_action(self.cfg.model_family))
                 self._add_observation(obs, replay_images, replay_wrist_images)
-                # Record curated concepts snapshot each timestep
-                try:
-                    _ci = build_contact_index(env)
-                except Exception:
-                    _ci = None
-                concept_list = rec.concepts if rec.concepts else select_task_concepts(env)
-                snapshot = evaluate_concept_expressions(env, concept_list, contact_index=_ci)
-                rec.append(snapshot)
+                # During warmup we do not record concepts to preserve 1:1 alignment with collected samples
                 timestep += 1
                 continue
 
@@ -460,17 +491,16 @@ class ParallelLiberoEvaluator:
                 for a in action:
                     obs, reward, done, info = env.step(a.tolist())
                     self._add_observation(obs, replay_images, replay_wrist_images)
-                    # Record curated concepts snapshot after each sub-step using cached contact index
-                    concept_list = rec.concepts if rec.concepts else select_task_concepts(env)
-                    snapshot = evaluate_concept_expressions(env, concept_list, contact_index=_ci_once)
-                    rec.append(snapshot)
-
                     timestep += 1
                     if show_detail:
                         self.logger.info(f"Step {timestep}: done {done}, {info}")
                     if done:
                         success = True
                         break
+                # Record curated concepts snapshot once per collected sample (post chunk)
+                concept_list = rec.concepts if rec.concepts else select_task_concepts(env)
+                snapshot = evaluate_concept_expressions(env, concept_list, contact_index=_ci_once)
+                rec.append(snapshot)
                 if success:
                     break
             else:
@@ -509,7 +539,9 @@ class ParallelLiberoEvaluator:
                     image_reconstruction_clues = {
                         'task_id': task_id,
                         'episode_id': episode,
-                        'env_seed': episode  # In LIBERO, env seed typically equals episode ID
+                        'env_seed': episode,  # In LIBERO, env seed typically equals episode ID
+                        'scene_name': scene_name,
+                        'task_description': task_description,
                     }
                     
                     data_collector.save_episode_data(
@@ -717,6 +749,21 @@ def str_to_bool(v):
 
 
 def main(args):
+    # Early diagnostics: CUDA / GPU availability
+    try:
+        import torch
+        has_cuda = torch.cuda.is_available()
+        ndev = torch.cuda.device_count() if has_cuda else 0
+        dev_names = []
+        for i in range(ndev):
+            try:
+                dev_names.append(torch.cuda.get_device_name(i))
+            except Exception:
+                dev_names.append("<unknown>")
+        print(f"[ENV] CUDA available: {has_cuda}; device_count={ndev}; devices={dev_names}")
+    except Exception as _e:
+        print(f"[ENV] CUDA probe failed: {_e}")
+
     for step in args.steps:
         cfg = GenerateConfig(
             load_step=step, 

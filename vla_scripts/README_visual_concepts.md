@@ -67,6 +67,40 @@ Purpose: Map the exact files and functions involved in simulator state access, g
 - Trajectory replay:
   - `vla_scripts/reconstruct_trajectory_data.py` replays actions from `/optimized_trajectory_data/` and calls the shared extractor to produce per‑step concept vectors for probes 3–4.
 
+## Dataset Layout (Task‑Sharded)
+
+For task‑sharded optimized datasets (e.g., `/work/nvme/bfbo/xzhang42/data/more_test/optimized_trajectory_data`), files are organized per scene/instruction shard:
+
+```
+.../optimized_trajectory_data/
+├── <scene>__<instruction>/
+│   ├── actions.h5                  # [N_rows, action_dim]
+│   ├── vision_features.h5          # [N_rows, num_patches, vision_dim]
+│   ├── vlm_embeddings.h5           # [N_rows, vlm_dim]
+│   ├── hidden_states/
+│   │   ├── generation_step_0.h5    # layer_00..layer_24
+│   │   └── generation_step_6.h5
+│   ├── concepts.h5                 # concepts, concept_names, episode_success
+│   └── episode_index.h5            # task_id, episode_id, success, num_timesteps,
+│                                   # shard_start_idx, shard_end_idx
+└── ...
+```
+
+Alignment and association:
+- All arrays in a shard align on rows (index i across files refers to the same timestep).
+- `episode_index.h5` provides per‑episode contiguous row segments `[shard_start_idx, shard_end_idx]`.
+- `concepts.h5/episode_success` duplicates the per‑episode success label at row level and is constant within each segment, enabling 1:1 mapping from concepts to success/failure and to the exact trajectory slice.
+
+Quick print of a shard’s index:
+```
+python -c "import h5py,pandas as pd; f=h5py.File('.../episode_index.h5'); D={k:(f[k][:].astype('U') if f[k].dtype.kind=='S' else f[k][:]) for k in f.keys()}; print(pd.DataFrame(D)); f.close()"
+```
+
+Validate per‑episode constant success in concepts:
+```
+python -c "import h5py,numpy as np,sys; S=sys.argv[1]; f=h5py.File(S+'/concepts.h5'); rs=f['episode_success'][:]; g=h5py.File(S+'/episode_index.h5'); s0=g['shard_start_idx'][:]; s1=g['shard_end_idx'][:]; ok=all(rs[s0[i]:s1[i]+1].min()==rs[s0[i]:s1[i]+1].max()==g['success'][i] for i in range(len(s0))); print('OK' if ok else 'MISMATCH'); f.close(); g.close()" S=<shard_dir>
+```
+
 ## PDDL / BDDL State Note
 
 - LIBERO does not ship a one‑call “export full symbolic state” API. You can enumerate and evaluate predicates yourself with:

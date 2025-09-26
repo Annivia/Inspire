@@ -30,7 +30,7 @@ Concept extraction is LIBERO-native (no custom geometry):
 ```bash
 python vla_scripts/reconstruct_trajectory_data.py \
   /work/nvme/bfbo/xzhang42/data/pilot_test/optimized_trajectory_data \
-  --auto-paths --render-concepts          # add --concepts-all to render all concepts
+  --auto-paths
 ```
 
 - Two-task quick test (metadata, two episodes, combined GIFs, merge states):
@@ -222,3 +222,108 @@ Each experiment requires three baselines: Normal (original data), Randomized pai
 - Save results to structured files for each experiment condition
 - Generate PNG visualizations (no plt.show() on server)
 - Design modular structure to accommodate all four experiments incrementally
+
+## Task‑Sharded Storage (Per Scene / Task / Episode)
+
+Some runs (including `/work/nvme/bfbo/xzhang42/data/more_test`) save the optimized dataset in a task‑sharded layout for robustness and easy partial transfer. Files are organized per scene and instruction under `optimized_trajectory_data/<scene>__<instruction>/`.
+
+Top‑level layout (root):
+```
+/optimized_trajectory_data/
+├── dataset_summary.json         # Optional in sharded mode
+├── episode_index.h5             # Optional global index (may be missing)
+├── <scene>__<instruction>/      # One shard per scene/instruction
+│   ├── actions.h5               # [N_rows, action_dim]
+│   ├── vision_features.h5       # [N_rows, n_patches, vision_dim]
+│   ├── vlm_embeddings.h5        # [N_rows, vlm_dim]
+│   ├── hidden_states/
+│   │   ├── generation_step_0.h5 # datasets: layer_00..layer_24 → [N_rows, …]
+│   │   └── generation_step_6.h5
+│   ├── concepts.h5              # datasets:
+│   │   ├── concepts            # [N_rows, N_concepts] 0/1
+│   │   ├── concept_names       # [N_concepts] bytes
+│   │   └── episode_success     # [N_rows] 0/1 — per‑row success label
+│   └── episode_index.h5        # shard‑local episode index with:
+│       ├── task_id, episode_id, success (0/1), num_timesteps
+│       └── shard_start_idx, shard_end_idx (row offsets into shard arrays)
+└── ...
+```
+
+Row alignment invariants within each shard:
+- All arrays (actions, vision_features, vlm_embeddings, each hidden_states file, concepts) share the same row axis (N_rows) and are aligned by index.
+- `episode_index.h5` provides contiguous row ranges per episode: `[shard_start_idx, shard_end_idx]`.
+- `concepts.h5/episode_success` duplicates the per‑episode success onto each row, enabling direct 1:1 joins at row level.
+
+Notes:
+- In sharded runs, a root `episode_index.h5` may be omitted. Association within each shard remains fully defined through the shard‑local index and `episode_success`.
+- Directory names are sanitized from `scene_name` and `task_description` as `<scene>__<instruction>`; they are deterministic and can be used as part of a trajectory identifier.
+
+### 1:1 Association: Success, Concepts, and Trajectory Data
+
+Given a shard directory `S = optimized_trajectory_data/<scene>__<instruction>`:
+- Per‑trajectory association:
+  - Read `S/episode_index.h5` and iterate rows. For each episode, slice `[s0:s1] = [shard_start_idx, shard_end_idx]` across all arrays to get that episode’s data.
+  - `success` in `S/episode_index.h5` is the episode label. `concepts.h5/episode_success[s0:s1+1]` is constant and equals that label.
+- Per‑row association:
+  - Use `concepts.h5/episode_success[i]` as the success label for row `i`. This matches the episode that row belongs to and is identical across its episode segment.
+
+Quick checks (copy/paste):
+- Print a shard’s local index:
+  - `python -c "import h5py,pandas as pd; f=h5py.File('S/episode_index.h5'); D={k:(f[k][:].astype('U') if f[k].dtype.kind=='S' else f[k][:]) for k in f.keys()}; print(pd.DataFrame(D)); f.close()"`
+- Validate per‑episode constant success in concepts:
+  - `python -c "import h5py,numpy as np; import sys; S=sys.argv[1]; f=h5py.File(S+'/concepts.h5'); rs=f['episode_success'][:]; g=h5py.File(S+'/episode_index.h5'); s0=g['shard_start_idx'][:]; s1=g['shard_end_idx'][:]; ok=all(rs[s0[i]:s1[i]+1].min()==rs[s0[i]:s1[i]+1].max()==g['success'][i] for i in range(len(s0))); print('OK' if ok else 'MISMATCH'); f.close(); g.close()" S=<shard_dir>`
+
+### Trajectory Identity and Hashing (Success/Failure Split)
+
+Define a stable trajectory key using fields that uniquely identify a simulated run:
+- `scene_key`: shard directory name `<scene>__<instruction>`
+- `task_id`: integer from `episode_index.h5`
+- `episode_id`: integer (also used as env seed in LIBERO)
+
+Example: `traj_key = f"{scene_key}::task={task_id}::episode={episode_id}"`
+Hashing to a compact ID (e.g., SHA1):
+```python
+import hashlib
+def traj_uid(scene_key: str, task_id: int, episode_id: int) -> str:
+    s = f"{scene_key}::task={task_id}::episode={episode_id}"
+    return hashlib.sha1(s.encode()).hexdigest()[:16]
+```
+
+Generate success/failure lists per shard:
+```python
+import h5py, pandas as pd, hashlib, os
+from pathlib import Path
+root = Path('/work/nvme/bfbo/xzhang42/data/more_test/optimized_trajectory_data')
+rows = []
+for shard in sorted([p for p in root.iterdir() if p.is_dir()]):
+    epi = shard/'episode_index.h5'
+    if not epi.exists():
+        continue
+    with h5py.File(epi,'r') as f:
+        df = pd.DataFrame({k:(f[k][:].astype('U') if f[k].dtype.kind=='S' else f[k][:]) for k in f.keys()})
+    for _, r in df.iterrows():
+        uid = hashlib.sha1(f"{shard.name}::{int(r.task_id)}::{int(r.episode_id)}".encode()).hexdigest()[:16]
+        rows.append({
+            'scene_key': shard.name,
+            'task_id': int(r.task_id),
+            'episode_id': int(r.episode_id),
+            'success': bool(r.success),
+            'uid': uid,
+            's0': int(r.shard_start_idx),
+            's1': int(r.shard_end_idx),
+            'shard_dir': str(shard),
+        })
+df = pd.DataFrame(rows)
+success_uids = df[df.success]['uid'].tolist()
+failure_uids = df[~df.success]['uid'].tolist()
+print('success', len(success_uids), 'failure', len(failure_uids))
+```
+
+Using the association invariants above, you can slice any modality for a given trajectory by `S[s0:s1+1]` (actions, vision_features, vlm_embeddings, hidden_states/generation_step_k.h5:layer_XX, and concepts), and label it using either `success` from `episode_index.h5` or `episode_success[s0]`.
+
+### Optional Root Index (Monolithic + Sharded Cross‑Check)
+
+If a root `episode_index.h5` exists, you can cross‑check shard labels with the root by merging on `(task_id, episode_id)`. A helper is provided:
+- `python vla_scripts/check_concepts_success_alignment.py /path/to/optimized_trajectory_data`
+
+This verifies that `concepts.h5/episode_success` is constant within each shard episode segment and (when the root index is present) equals the root’s success flag.
